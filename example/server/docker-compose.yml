@@ -1,0 +1,45 @@
+services:
+  connection-ports:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      RUST_LOG: "info"
+      SERVER: "1"
+      WORKERS: "3"
+      READ_BUFFER_SIZE: "4096"
+      CRYPTO_KEY: "<EDIT: set key value>"
+      SERVER_TCP_TARGET: "web-api:10.6.5.15:3128;iperf-tcp:10.6.5.20:9091"
+      SERVER_UDP_TARGET: "dns:8.8.8.8:53;iperf-udp:10.6.5.20:9092"
+      COMPRESS: "0"
+      REDIS_URL: "redis://default:<EDIT: set password for redis>@10.6.5.13:6379/"
+    restart: unless-stopped
+    depends_on:
+      - redis-public
+    networks:
+      private_net:
+        ipv4_address: 10.6.5.20
+
+  squid-api:
+    image: ubuntu/squid
+    restart: unless-stopped
+    networks:
+      private_net:
+        ipv4_address: 10.6.5.15
+
+  redis-public:
+    image: redis
+    restart: unless-stopped
+    command: redis-server --requirepass <EDIT: set password for redis>
+    ports:
+      - "6379:6379"
+    networks:
+      private_net:
+        ipv4_address: 10.6.5.13
+
+networks:
+  private_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.6.5.0/24

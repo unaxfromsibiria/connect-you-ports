@@ -1,0 +1,17 @@
+services:
+  connection-port-local:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      RUST_LOG: "info"
+      SERVER: "0"
+      READ_BUFFER_SIZE: "4096"
+      CLIENT_NAME: "example-or-edit"
+      WORKERS: "2"
+      TCP_SOCKETS: "web-api:0.0.0.0:7128;iperf-tcp:0.0.0.0:5501"
+      UDP_SOCKETS: "dns:0.0.0.0:5533;iperf-udp:0.0.0.0:5500"
+      CRYPTO_KEY: "<EDIT: set the same key value from server>"
+      COMPRESS: "0"
+      REDIS_URL: "redis://default:<EDIT: set password for redis>@<EDIT: set your server>:6379/"
+    restart: unless-stopped
