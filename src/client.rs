@@ -360,7 +360,9 @@ pub async fn client_processing(settings: Settings, data_handler: DataHandlerSett
                     }
                     // timeout operation
                     _ = sleep(Duration::from_secs(idle_limit)) => {
-                        warn!("No UDP transfer {} in {}", c_ip, service_code);
+                        if !c_ip.is_empty() {
+                            warn!("No UDP transfer {} in {}", c_ip, service_code);
+                        }
                         if !current_peer_code.is_empty() {
                             let (payload, _) = service_data_handler.make_quit_message(&service_code, &current_peer_code, false);
                             match r_con.publish::<&str, &Vec<u8>, ()>(&out_topic, &payload).await {

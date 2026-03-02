@@ -14,4 +14,9 @@ services:
       CRYPTO_KEY: "<EDIT: set the same key value from server>"
       COMPRESS: "0"
       REDIS_URL: "redis://default:<EDIT: set password for redis>@<EDIT: set your server>:6379/"
-    restart: unless-stopped
+    ports:
+      - "7128:7128/tcp"
+      - "9091:9091/tcp"
+      - "9092:9092/udp"
+      - "5553:5553/udp"
+    restart: always

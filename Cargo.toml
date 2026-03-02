@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "~1.49", features = ["full"] }
+chrono = { version = "~0.4" }
 log = { version = "~0.4", features = ["std", "serde"] }
 redis = { version = "~0.26", features = ["aio", "tokio-comp"] }
 env_logger = { version = "~0.11" }

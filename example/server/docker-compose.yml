@@ -13,7 +13,7 @@ services:
       SERVER_UDP_TARGET: "dns:8.8.8.8:53;iperf-udp:10.6.5.20:9092"
       COMPRESS: "0"
       REDIS_URL: "redis://default:<EDIT: set password for redis>@10.6.5.13:6379/"
-    restart: unless-stopped
+    restart: always
     depends_on:
       - redis-public
     networks:
