@@ -19,4 +19,9 @@ services:
       - "9091:5501/tcp"  # iperf -p 9091 -c 127.0.0.1 
       - "9092:5500/udp"  # iperf -u -p 9092 -c 127.0.0.1 
       - "5533:5533/udp"  # nslookup -port=5533 google.com 127.0.0.1
+    healthcheck:
+      test: ["CMD-SHELL", "pidof connect-you-ports || pidof iperf | xargs kill"]
+      interval: 15s
+      timeout: 1s
+      retries: 1
     restart: always
