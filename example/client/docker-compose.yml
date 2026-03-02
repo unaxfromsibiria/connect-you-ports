@@ -15,8 +15,8 @@ services:
       COMPRESS: "0"
       REDIS_URL: "redis://default:<EDIT: set password for redis>@<EDIT: set your server>:6379/"
     ports:
-      - "7128:7128/tcp"
-      - "9091:9091/tcp"
-      - "9092:9092/udp"
-      - "5553:5553/udp"
+      - "7128:7128/tcp"  # curl -x http://127.0.0.1:7128 https://docs.rs/
+      - "9091:5501/tcp"  # iperf -p 9091 -c 127.0.0.1 
+      - "9092:5500/udp"  # iperf -u -p 9092 -c 127.0.0.1 
+      - "5533:5533/udp"  # nslookup -port=5533 google.com 127.0.0.1
     restart: always
