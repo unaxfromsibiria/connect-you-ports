@@ -1,2 +1,6 @@
-/target
+/*/target
+/*/docker-compose.yml
 /docker-compose.yml
+/target
+.vscode
+*/.vscode

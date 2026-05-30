@@ -1,4 +1,4 @@
-FROM rust:1.93
+FROM rust:1.95
 RUN apt update
 RUN apt install -y openssl build-essential libssl-dev curl iperf bash
 
