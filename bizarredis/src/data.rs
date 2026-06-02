@@ -17,7 +17,7 @@ pub struct DataMsg {
 }
 
 impl DataMsg {
-    pub fn dump(&self, to_server: bool) -> Vec<u8> {
+    pub fn dump(&self, to_server: bool) -> (Vec<u8>, Vec<u8>) {
         let serialized = bincode::serialize(&self).unwrap();
         let data_len = serialized.len() as u32;
         let len_bytes = data_len.to_le_bytes();
@@ -26,16 +26,14 @@ impl DataMsg {
             let mut prefix_with_len = prefix_part.as_bytes().to_vec();
             prefix_with_len.extend_from_slice(&len_bytes);
             let padding_len = CMD_BUF_SIZE.saturating_sub(prefix_with_len.len());
-            let mut result = Vec::with_capacity(CMD_BUF_SIZE + serialized.len());
-            result.extend_from_slice(&prefix_with_len);
-            result.extend(fake_data(padding_len));
-            result.extend_from_slice(&serialized);
-            result
+            let mut s_part = Vec::with_capacity(CMD_BUF_SIZE);
+            s_part.extend_from_slice(&prefix_with_len);
+            s_part.extend(fake_data(padding_len));
+            (s_part, serialized)
         } else {
-            let mut result = Vec::with_capacity(4 + serialized.len());
-            result.extend_from_slice(&len_bytes);
-            result.extend_from_slice(&serialized);
-            result
+            let mut s_part = Vec::with_capacity(4);
+            s_part.extend_from_slice(&len_bytes);
+            (s_part, serialized)
         }
     }
 }
@@ -191,10 +189,9 @@ mod tests {
         assert!(!msg.x);
         assert!(msg.n.is_empty());
 
-        let dumped = msg.dump(false);
-        let payload = &dumped[4..];
+        let (_, serialized) = msg.dump(false);
+        let loaded = handler.load_data_message(&serialized).unwrap();
         
-        let loaded = handler.load_data_message(payload).unwrap();
         assert_eq!(loaded.d, data);
         assert_eq!(loaded.s, service);
         assert_eq!(loaded.t, transfer);
@@ -217,10 +214,9 @@ mod tests {
         assert!(!msg.x);
         assert!(!msg.n.is_empty());
 
-        let dumped = msg.dump(false);
-        let payload = &dumped[4..];
+        let (_prefix, serialized) = msg.dump(false);
         
-        let loaded = handler.load_data_message(payload).unwrap();
+        let loaded = handler.load_data_message(&serialized).unwrap();
         assert_eq!(loaded.d, data);
         assert!(!loaded.x);
     }
@@ -247,10 +243,9 @@ mod tests {
         let transfer = get_uuid();
         
         let msg = handler_encrypt.make_data_message(&data, &service, &transfer);
-        let dumped = msg.dump(false);
-        let payload = &dumped[4..];
+        let (_prefix, serialized) = msg.dump(false);
         
-        let result = handler_decrypt.load_data_message(payload);
+        let result = handler_decrypt.load_data_message(&serialized);
         assert!(result.is_err());
     }
 
@@ -280,12 +275,12 @@ mod tests {
         let transfer = get_uuid();
         
         let msg = handler.make_data_message(&data, &service, &transfer);
-        let dumped = msg.dump(true);
+        let (prefix, _serialized) = msg.dump(true);
         
         let service_simple = Simple::from_uuid(service).to_string();
         let expected_prefix = format!("SET {} ", service_simple);
         
-        assert!(dumped.starts_with(expected_prefix.as_bytes()));
+        assert!(prefix.starts_with(expected_prefix.as_bytes()));
     }
 
     #[test]

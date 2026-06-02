@@ -35,11 +35,13 @@ async fn server_data_processing(
     let idle_limit = if tcp_service {settings.idle_tcp_limit} else {settings.idle_udp_limit};
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
     let stat_key = format!("out-total-{}", service_name);
-    let buffer_size_limit = settings.buffer_size * 4;
+    let buffer_size_limit = settings.buffer_size * 3;
+    let stat_save_iter = settings.stat_save_iter;
     let mut init_try = true; 
     let mut skip_reconnect = true;
     let mut reconnection_count = 0;
     let mut reconnect_delay = settings.reconnect_delay(0);
+    let mut get_size_problems = 0;
 
     loop {
         // keep connection loop
@@ -51,6 +53,7 @@ async fn server_data_processing(
                 }
                 stream.set_nodelay(true).unwrap();
                 if !skip_reconnect {
+                    get_size_problems = 0;
                     reconnection_count += 1;
                     reconnect_delay = settings.reconnect_delay(reconnection_count);
                     update_metric(&format!("{}-reconnection", service_name), reconnection_count).await;
@@ -81,17 +84,18 @@ async fn server_data_processing(
                         Ok(n) => {
                             if n != 4 {
                                 warn!("Server stream got wrong size block: {}", n);
-                                break;
+                                continue;
                             }
                             let size_bytes = &size_buffer[..n];
                             let expect_data_size = u32::from_le_bytes(size_bytes.try_into().unwrap()) as usize;
                             if expect_data_size > buffer_size_limit {
-                                error!(
+                                debug!(
                                     "Unexpectedly large data buffer size: {} bytes. Protocol limit is {} bytes.",
                                     expect_data_size,
                                     buffer_size_limit
                                 );
-                                break;
+                                get_size_problems += 1;
+                                continue;
                             }
                             let mut data = vec![0u8; expect_data_size];
                             match reader.read_exact(&mut data).await {
@@ -99,6 +103,7 @@ async fn server_data_processing(
                                     debug!("Server sent {} bytes", expect_data_size);
                                 },
                                 Err(err) => {
+                                    skip_reconnect = tcp_service;
                                     error_count += 1;
                                     error!("Failed to read data from server for {}: {}", serv, err);
                                     break;
@@ -133,7 +138,9 @@ async fn server_data_processing(
                                 },
                                 Err(err) => {
                                     error_count += 1;
+                                    skip_reconnect = tcp_service;
                                     error!("Failed to parse data message for {}: {}", serv, err);
+                                    break;
                                 }
                             }
                         },
@@ -153,13 +160,19 @@ async fn server_data_processing(
                     } else {
                         data_handler.make_data_message(&msg_data, &service_code, t_id)
                     };
-                    if let Err(err) = writer.write_all(&msg.dump(true)).await {
+                    let (s_part, d_part) = msg.dump(true);
+                    if let Err(err) = writer.write_all(&s_part).await {
+                        error_count += 1;
+                        skip_reconnect = tcp_service;
+                        error!("Failed to write to TCP stream for {}: {}", serv, err);
+                        break;
+                    } else if let Err(err) = writer.write_all(&d_part).await {
                         error_count += 1;
                         skip_reconnect = tcp_service;
                         error!("Failed to write to TCP stream for {}: {}", serv, err);
                         break;
                     } else {
-                        out_bytes = msg.d.len();
+                        out_bytes += msg.d.len();
                     }
                 },
                 _ = sleep(idle_limit) => {
@@ -169,20 +182,29 @@ async fn server_data_processing(
                     warn!("Connection closed due to idle timeout for {}", serv);
                     without_attempt = true;
                     let msg = data_handler.make_quit_message(&service_code, &transfer);
-                    if let Err(err) = writer.write_all(&msg.dump(true)).await {
+                    let (s_part, d_part) = msg.dump(true);
+                    if let Err(err) = writer.write_all(&s_part).await {
                         error_count += 1;
                         skip_reconnect = tcp_service;
                         error!("Failed to write quit message to TCP stream for {}: {}", serv, err);
-                        break;
+                    } else if let Err(err) = writer.write_all(&d_part).await {
+                        error_count += 1;
+                        skip_reconnect = tcp_service;
+                        error!("Failed to write quit message to TCP stream for {}: {}", serv, err);
                     } else {
-                        out_bytes = msg.d.len();
+                        out_bytes += msg.d.len();
                     }
                     break;
+                },
+                _ = sleep(stat_save_iter) => {
+                    if get_size_problems > 0 {
+                        update_metric(&format!("{}-wrong-size-block", stat_key), get_size_problems).await;
+                    }
+                    if in_bytes + out_bytes + error_count > 0 {
+                        update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
+                        (in_bytes, out_bytes, error_count) = (0, 0, 0);
+                    }
                 }
-            }
-            if in_bytes + out_bytes + error_count > 0 {
-                update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
-                (in_bytes, out_bytes, error_count) = (0, 0, 0);
             }
         }
         if skip_reconnect {
@@ -258,12 +280,17 @@ async fn server_data_processing(
                         }
                         let t_id = if client_transfer.is_nil() {&transfer} else {&client_transfer};
                         let msg = data_handler.make_data_message(&msg_data, &service_code, t_id);
-                        if let Err(err) = writer.write_all(&msg.dump(true)).await {
+                        let (s_part, d_part) = msg.dump(true);
+                        if let Err(err) = writer.write_all(&s_part).await {
+                            error_count += 1;
+                            error!("Failed to write to TCP stream during cleanup for {}: {}", serv, err);
+                            break;
+                        } else if let Err(err) = writer.write_all(&d_part).await {
                             error_count += 1;
                             error!("Failed to write to TCP stream during cleanup for {}: {}", serv, err);
                             break;
                         } else {
-                            out_bytes = msg.d.len();
+                            out_bytes += msg.d.len();
                         }
                     },
                     _ = sleep(wait_before_close_time) => {
@@ -298,6 +325,7 @@ async fn handle_tcp_connection(
     let (s_name, s_code) = service; 
     let stat_key = format!("in-{}-{}", s_name, ip);
     let service_name = format!("{} ({})", s_name, part_uuid(&s_code));
+    let stat_save_iter = settings.stat_save_iter;
     let mut with_quit = true;
     let t_inf = part_uuid(&transfer);
 
@@ -306,10 +334,6 @@ async fn handle_tcp_connection(
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
 
     loop {
-        if in_bytes + out_bytes + error_count > 0 {
-            update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
-            (in_bytes, out_bytes, error_count) = (0, 0, 0);
-        }
         tokio::select! {
             // Read from client connection
             n = reader.read(&mut buf) => {
@@ -355,6 +379,12 @@ async fn handle_tcp_connection(
                 warn!("Idle timeout for TCP connection {} client {}", t_inf, ip);
                 break;
             },
+            _ = sleep(stat_save_iter) => {
+                if in_bytes + out_bytes + error_count > 0 {
+                    update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
+                    (in_bytes, out_bytes, error_count) = (0, 0, 0);
+                }
+            }
         }
     }
 
@@ -401,7 +431,7 @@ async fn handle_udp_connection(
     mut from_client_channel: mpsc::Receiver<(Uuid, Bytes)>,
 ) {
     let mut buf = vec![0; settings.buffer_size];
-    let idle_limit = settings.idle_udp_limit;
+    let stat_save_iter = settings.idle_udp_limit;
     let min_delay = settings.service_delay();
     let (s_name, s_code) = service; 
     let service_name = format!("{} ({})", s_name, part_uuid(&s_code));
@@ -462,7 +492,7 @@ async fn handle_udp_connection(
                     warn!("Unknown peer for UDP transfer {} in service {}", transfer_id, service_name);
                 }
             },
-            _ = sleep(idle_limit) => {
+            _ = sleep(stat_save_iter) => {
                 if in_bytes + out_bytes + error_count > 0 && !stat_key.is_empty() {
                     update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
                     (in_bytes, out_bytes, error_count) = (0, 0, 0);

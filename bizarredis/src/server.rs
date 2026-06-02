@@ -401,6 +401,7 @@ pub async fn run_server(settings: Settings) {
             warn!("Current TTL is {}", stream.ttl().unwrap());
         }
         stream.set_nodelay(true).unwrap();
+        let stat_save_iter = settings.stat_save_iter;
         let udp_targets = settings.udp_targets.clone();
         let tcp_targets = settings.tcp_targets.clone();
         let local_known_commands = arc_known_commands.clone();
@@ -432,10 +433,13 @@ pub async fn run_server(settings: Settings) {
             let mut cur_service = Uuid::nil();
             let mut cur_transfer_id = Uuid::nil();
             let ip_str = peer_addr.ip().to_string();
+            let buffer_size_limit = arc_settings.buffer_size * 3;
             let mut stat_key = format!("unknown-{}", ip_str);
             let mut wrong_attempt = 0;
             let mut scan_attempt = 0;
+            let mut response ;
             let (mut reader, mut writer) = tokio::io::split(stream);
+            let mut get_size_problems = 0;
             add_connection(&ip_str).await;
 
             loop {
@@ -446,10 +450,7 @@ pub async fn run_server(settings: Settings) {
                                 break;
                             }
                             Ok(n) => {
-                                if n == 0 {
-                                    break;
-                                }
-                                let mut response = if true_client {
+                                response = if true_client {
                                      String::new()
                                 } else {
                                     let part_len = (max_word_len + 1).min(n);
@@ -502,6 +503,15 @@ pub async fn run_server(settings: Settings) {
                                         wrong_attempt += 1;
                                         update_metric(&format!("suspicious-{}", ip_str), wrong_attempt).await;
                                     } else if let (Some(t_ip), Some(t_port)) = (in_target_ip, in_target_port) {
+                                        if expect_data_size > buffer_size_limit {
+                                            get_size_problems += 1;
+                                            debug!(
+                                                "Unexpectedly large data buffer size: {} bytes. Protocol limit is {} bytes.",
+                                                expect_data_size,
+                                                buffer_size_limit
+                                            );
+                                            continue;
+                                        }
                                         stat_key = format!("{}-{}", ip_str, service_name);
                                         let mut data_slice = vec![0u8; expect_data_size];
                                         match reader.read_exact(&mut data_slice).await {
@@ -514,8 +524,8 @@ pub async fn run_server(settings: Settings) {
                                         }
                                         match data_handler.load_data_message(&data_slice) {
                                             Ok(msg) => {
-                                                latest_quit = msg.x;
                                                 if msg.x {
+                                                    latest_quit = true;
                                                     to_close = true;
                                                     info!("Connection {} is closing by request for {} ({})", ip_str, cur_transfer_id, service_name);
                                                     continue;
@@ -580,14 +590,19 @@ pub async fn run_server(settings: Settings) {
                     },
                     Some(msg) = server_in.recv() => {
                         // write to connection
-                        let data = msg.dump(false);
-                        latest_quit = msg.x;
-                        if let Err(err) = writer.write_all(&data).await {
+                        if msg.x {
+                            latest_quit = true;
+                        }
+                        let (s_part, d_part) = msg.dump(false);
+                        if let Err(err) = writer.write_all(&s_part).await {
+                            error!("Failed to write to TCP stream {} {}: {}", ip_str, cur_service, err);
+                            error_count += 1;
+                        } else if let Err(err) = writer.write_all(&d_part).await {
                             error!("Failed to write to TCP stream {} {}: {}", ip_str, cur_service, err);
                             error_count += 1;
                         } else {
-                            debug!("Client data {} has been sent for {} {}", data.len(), cur_service, ip_str);
-                            out_bytes += data.len();
+                            debug!("Client data {} has been sent for {} {}", s_part.len() + d_part.len(), cur_service, ip_str);
+                            out_bytes += d_part.len() + s_part.len();
                         }
                     },
                     _ = sleep(idle_limit) => {
@@ -596,11 +611,16 @@ pub async fn run_server(settings: Settings) {
                         }
                         info!("Closing connection due to idle timeout for {} ({})", cur_service, cur_transfer_id);
                         break;
+                    },
+                    _ = sleep(stat_save_iter) => {
+                        if get_size_problems > 0 {
+                            update_metric(&format!("{}-{}-wrong-size-block", cur_service, ip_str), get_size_problems).await;
+                        }
+                        if in_bytes + out_bytes + error_count > 0 {
+                            update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
+                            (in_bytes, out_bytes, error_count) = (0, 0, 0);
+                        }
                     }
-                }
-                if in_bytes + out_bytes + error_count > 0 {
-                    update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
-                    (in_bytes, out_bytes, error_count) = (0, 0, 0);
                 }
             }
             if !true_client {
@@ -608,8 +628,7 @@ pub async fn run_server(settings: Settings) {
                     Uuid::nil(), Uuid::nil(), String::new(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0, false,
                 );
                 let _ = settings_out.send(settings_item).await;
-            }
-            if true_client && !latest_quit{
+            } else if !latest_quit{
                 let quit_msg = data_handler.make_quit_message(&cur_service, &cur_transfer_id);
                 match client_out.send(quit_msg).await {
                     Ok(_) => sleep(close_delay).await,

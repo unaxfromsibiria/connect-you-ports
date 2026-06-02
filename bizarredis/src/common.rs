@@ -8,6 +8,7 @@ use uuid::Uuid;
 use sha1::{Sha1, Digest};
 use ipnetwork::IpNetwork; 
 use tokio::time::Duration;
+use rand;
 
 // env variables
 const ENV_IS_SERVER: &str = "SERVER";
@@ -27,6 +28,7 @@ const ENV_SERVER_HOST: &str = "SERVER_HOST";
 const ENV_SERVER_PORT: &str = "SERVER_PORT";
 const ENV_LOADING_LEVEL: &str = "LOADING_LEVEL";
 const ENV_ALLOW_NET: &str = "ALLOW_NET";
+const ENV_STAT_SAVE_INTERVAL: &str = "STAT_SAVE_INTERVAL";
 
 pub type IpPortMap = HashMap<String, HashMap<IpAddr, u16>>;
 pub const OUT_TTL: u32 = 96;
@@ -230,6 +232,7 @@ pub struct Settings {
     pub workers: usize,
     pub buffer_size: usize,
     pub stat_delay: Duration,
+    pub stat_save_iter: Duration,
     pub client_name: String,
     pub tcp_sockets: IpPortMap,
     pub udp_sockets: IpPortMap,
@@ -294,10 +297,10 @@ impl LoadingParams for Settings {
     /// Returns the channel size configuration based on the loading level
     fn channel_size(&self) -> (usize, usize) {
         match self.loading_level {
-            LoadingLevelEnum::Default => (1024 * 10, 1024 * 6),
-            LoadingLevelEnum::High => (1024 * 12, 1024 * 8),
-            LoadingLevelEnum::Extremely => (1024 * 20, 1024 * 12),
-            LoadingLevelEnum::Low => (1024 * 4, 1024 * 2),
+            LoadingLevelEnum::Default => (1024 * 2, 1024 * 2),
+            LoadingLevelEnum::High => (1024 * 4, 1024 * 4),
+            LoadingLevelEnum::Extremely => (1024 * 5, 1024 * 4),
+            LoadingLevelEnum::Low => (1024 * 2, 1024 * 2),
         }
     }
 
@@ -362,6 +365,9 @@ pub fn create_settings() -> Settings {
         client_name = format!("{}-{}", if is_server {"s"} else {"c"}, fast_name());
     }
     let stat_delay = Duration::from_secs(_read_env_uint(ENV_STAT_SHOW_INTERVAL, true, 180) as u64);
+    let stat_save_iter = Duration::from_secs(
+        _read_env_uint(ENV_STAT_SAVE_INTERVAL, true, if is_server {2} else {1}) as u64
+    ) + Duration::from_millis(rand::random_range(100..500));
     let tcp_sockets = if !is_server {
         _read_env_socket_maps(ENV_TCP_SOCKETS, false)
     } else {
@@ -420,6 +426,7 @@ pub fn create_settings() -> Settings {
         workers,
         buffer_size,
         stat_delay,
+        stat_save_iter,
         client_name,
         tcp_sockets,
         udp_sockets,

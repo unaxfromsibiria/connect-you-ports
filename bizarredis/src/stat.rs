@@ -102,7 +102,7 @@ mod tests {
         let service = "test_service_1";
         let stat = GLOBAL_STAT.write().await;
         let initial_current = stat.connections.get(service).map(|(c, _)| *c).unwrap_or(0);
-        drop(stat); // Освобождаем запись
+        drop(stat);
 
         add_connection(service).await;
 
