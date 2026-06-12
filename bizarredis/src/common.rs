@@ -389,10 +389,10 @@ pub fn create_settings() -> Settings {
         IpPortMap::new()
     };
     let idle_tcp_limit = Duration::from_secs(
-        _read_env_uint(ENV_CONNECTION_IDLE, true, 60 * 5) as u64
+        _read_env_uint(ENV_CONNECTION_IDLE, true, 60 * 3) as u64
     );
     let idle_udp_limit = Duration::from_secs(
-        _read_env_uint(ENV_UDP_CONNECTION_IDLE, true, 60 * 4) as u64
+        _read_env_uint(ENV_UDP_CONNECTION_IDLE, true, 60 * 2) as u64
     );
     let mut udp_bind_from = _read_env_str(ENV_UDP_BIND_FROM, true);
     if udp_bind_from.is_empty() {udp_bind_from = "0.0.0.0:0".to_string();}

@@ -30,13 +30,13 @@ async fn server_data_processing(
     let server_port= settings.server_port.clone();
 
     let mut size_buffer = vec![0u8; 4];
-    let mut without_attempt = false;
     let serv = format!("{} ({})", service_name, part_uuid(&service_code));
     let idle_limit = if tcp_service {settings.idle_tcp_limit} else {settings.idle_udp_limit};
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
     let stat_key = format!("out-total-{}", service_name);
     let buffer_size_limit = settings.buffer_size * 3;
     let stat_save_iter = settings.stat_save_iter;
+    let service_conn_name = format!("to-server-{}", service_name);
     let mut init_try = true; 
     let mut skip_reconnect = true;
     let mut reconnection_count = 0;
@@ -72,6 +72,8 @@ async fn server_data_processing(
                 }
             }
         };
+        add_connection(&service_conn_name).await;
+        let mut without_attempt = false;
         loop {
             tokio::select! {
                 read_result = reader.read(&mut size_buffer) => {
@@ -180,7 +182,6 @@ async fn server_data_processing(
                         continue;
                     }
                     warn!("Connection closed due to idle timeout for {}", serv);
-                    without_attempt = true;
                     let msg = data_handler.make_quit_message(&service_code, &transfer);
                     let (s_part, d_part) = msg.dump(true);
                     if let Err(err) = writer.write_all(&s_part).await {
@@ -304,6 +305,7 @@ async fn server_data_processing(
             }
             break;
         }
+        lost_connection(&service_conn_name).await;
     }
 }
 

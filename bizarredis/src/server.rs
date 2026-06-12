@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::str::FromStr;
+use std::time::Duration;
 use log::{info, error, debug, warn};
 use tokio::net::UdpSocket;
 use crate::stat::{add_connection, lost_connection, update_traffic_stats, update_metric};
@@ -515,8 +516,11 @@ pub async fn run_server(settings: Settings) {
                                         stat_key = format!("{}-{}", ip_str, service_name);
                                         let mut data_slice = vec![0u8; expect_data_size];
                                         match reader.read_exact(&mut data_slice).await {
-                                            Ok(_) => {},
+                                            Ok(_) => {
+                                                to_close = false;
+                                            },
                                             Err(err) => {
+                                                to_close = true;
                                                 error_count += 1;
                                                 error!("Failed to read buffer {} in {}: {}", ip_str, service_name, err);
                                                 continue;
@@ -526,9 +530,8 @@ pub async fn run_server(settings: Settings) {
                                             Ok(msg) => {
                                                 if msg.x {
                                                     latest_quit = true;
-                                                    to_close = true;
                                                     info!("Connection {} is closing by request for {} ({})", ip_str, cur_transfer_id, service_name);
-                                                    continue;
+                                                    break;
                                                 }
                                                 if !true_client {
                                                     true_client = true;
@@ -536,27 +539,29 @@ pub async fn run_server(settings: Settings) {
                                                     if is_udp {
                                                         idle_limit = idle_udp_limit;
                                                     }
-                                                    let settings_item = (
-                                                        msg.t.clone(), code, service_name.clone(), t_ip, t_port, is_udp,
-                                                    );
+                                                    let settings_item = (msg.t.clone(), code, service_name.clone(), t_ip, t_port, is_udp);
                                                     match settings_out.send(settings_item).await {
                                                         Ok(_) => info!("Starting service connection {} ({})", service_name, cur_service),
-                                                        Err(err) => error!("Failed to send settings to client {} in {}: {}", ip_str, cur_service, err),
+                                                        Err(err) => {
+                                                            error!("Failed to send settings to client {} in {}: {}", ip_str, cur_service, err);
+                                                            break;
+                                                        }
                                                     }
                                                 }
                                                 if cur_transfer_id.is_nil() {
                                                     cur_transfer_id = msg.t.clone();
                                                 }
                                                 let m_size = msg.d.len();
+                                                in_bytes += expect_data_size;
                                                 match client_out.send(msg).await {
                                                     Ok(_) => {
                                                         debug!("Received client message with data size: {}", m_size);
-                                                        in_bytes = expect_data_size;
                                                     },
                                                     Err(err) => {
                                                         error_count += 1;
+                                                        to_close = true;
                                                         error!("Failed to send data to client {} in {}: {}", ip_str, service_name, err);
-                                                        break;
+                                                        continue;
                                                     }
                                                 }
                                             },
@@ -590,9 +595,7 @@ pub async fn run_server(settings: Settings) {
                     },
                     Some(msg) = server_in.recv() => {
                         // write to connection
-                        if msg.x {
-                            latest_quit = true;
-                        }
+                        latest_quit = msg.x;
                         let (s_part, d_part) = msg.dump(false);
                         if let Err(err) = writer.write_all(&s_part).await {
                             error!("Failed to write to TCP stream {} {}: {}", ip_str, cur_service, err);
@@ -606,10 +609,8 @@ pub async fn run_server(settings: Settings) {
                         }
                     },
                     _ = sleep(idle_limit) => {
-                        if true_client {
-                            continue;
-                        }
                         info!("Closing connection due to idle timeout for {} ({})", cur_service, cur_transfer_id);
+                        latest_quit = false;
                         break;
                     },
                     _ = sleep(stat_save_iter) => {
@@ -623,23 +624,30 @@ pub async fn run_server(settings: Settings) {
                     }
                 }
             }
-            if !true_client {
+            let and_wait = if !true_client {
                 let settings_item = (
                     Uuid::nil(), Uuid::nil(), String::new(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0, false,
                 );
                 let _ = settings_out.send(settings_item).await;
+                close_delay
             } else if !latest_quit{
                 let quit_msg = data_handler.make_quit_message(&cur_service, &cur_transfer_id);
                 match client_out.send(quit_msg).await {
-                    Ok(_) => sleep(close_delay).await,
-                    Err(err) => error!("Failed to send QUIT to client {} in {}: {}", peer_addr.ip(), cur_service, err),
+                    Ok(_) => close_delay,
+                    Err(err) => {
+                        error!("Failed to send QUIT to client {} in {}: {}", peer_addr.ip(), cur_service, err);
+                        Duration::from_secs(0)
+                    }
                 }
-            }
+            } else {
+                Duration::from_secs(0)
+            };
             if in_bytes + out_bytes + error_count > 0 {
                 update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
             }
             lost_connection(&ip_str).await;
             info!("Connection closed from {}", peer_addr);
+            sleep(and_wait).await;
         });
     }
 }
