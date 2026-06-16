@@ -1,18 +1,37 @@
+use log::{info, error, debug, warn};
 use tokio::sync::mpsc;
 use tokio::net::{TcpStream, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
-use uuid::Uuid;
+use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::str::FromStr;
 use std::time::Duration;
-use log::{info, error, debug, warn};
 use tokio::net::UdpSocket;
+use uuid::Uuid;
 use crate::stat::{add_connection, lost_connection, update_traffic_stats, update_metric};
 use crate::data::{DataHandler, DataHandlerSettings, DataMsg};
 use crate::common::{OUT_TTL, Settings, LoadingParams, IpPortMap, code_name, CMD_BUF_SIZE, part_uuid};
+
+
+static KNOWN_COMMANDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {[
+    "get", "set", "auth", "put", "setex", "keys", "del", "exists", "expire", "ttl", "type",
+    "append", "incr", "decr", "mget", "mset", "lpush", "rpush", "lpop", "rpop", "lrange",
+    "sadd", "srem", "smembers", "scard", "hset", "hget", "hdel", "hkeys", "hvals",
+    "zadd", "zrem", "zrange", "zcard", "ping", "echo", "select", "dbsize", "flushdb",
+    "quit", "shutdown", "config", "info", "subscribe", "publish", "unsubscribe",
+    "eval", "evalsha", "geoadd", "georadius", "spop", "srandermember", "hincrby", "hincrbyfloat",
+    "bitcount", "bitop", "sort", "debug", "monitor", "client", "cluster", "scan", "hscan", "sscan", "zscan",
+    "move", "rename", "renamenx", "restore", "persist", "pttl", "dump", "object", "expireat", "pexpire", "pexpireat",
+    "migrate", "dump", "restore", "wait", "blpop", "brpop", "brpoplpush", "linsert", "lset", "ltrim",
+    "sinter", "sinterstore", "sunion", "sunionstore", "sdiff", "sdiffstore", "zinterstore", "zunionstore", "zincrby",
+    "zrank", "zrevrank", "hstrlen", "hmget", "hexists", "hlen", "hrandfield", "pfadd", "pfcount", "pfmerge",
+    "geodist", "geohash", "geopos", "georadiusbymember", "xadd", "xdel", "xlen", "xrange",
+    "xrevrange", "xgroup", "xread", "ts", "json", "ft", "function",
+].into_iter().collect()});
+
 
 /// Handles data forwarding between a client and a TCP target service
 async fn handle_target_tcp_transfering(
@@ -355,6 +374,9 @@ fn extract_code(
 /// Starts the main server loop, accepting incoming TCP connections
 /// and spawning tasks to handle client communication and data transfer.
 pub async fn run_server(settings: Settings) {
+    if settings.tcp_targets.is_empty() || settings.udp_targets.is_empty() {
+        std::process::exit(1);
+    }
     let addr = format!("{}:{}", settings.server_host, settings.server_port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(tcp_l) => tcp_l,
@@ -365,27 +387,7 @@ pub async fn run_server(settings: Settings) {
     };
 
     info!("Transfer server listening on {}", addr);
-    let known_commands: HashSet<&str> = [
-        "get", "set", "auth", "put", "setex", "keys",
-        "del", "exists", "expire", "ttl", "type", "append", "incr", "decr", "mget", "mset",
-        "lpush", "rpush", "lpop", "rpop", "lrange",
-        "sadd", "srem", "smembers", "scard", "hset", "hget", "hdel", "hkeys", "hvals",
-        "zadd", "zrem", "zrange", "zcard", "ping", "echo", "select", "dbsize", "flushdb",
-        "quit", "shutdown", "config", "info", "subscribe", "publish", "unsubscribe",
-        "eval", "evalsha", "geoadd", "georadius", "spop", "srandermember", "hincrby", "hincrbyfloat",
-        "bitcount", "bitop", "sort", "debug", "monitor", "client", "cluster", "scan", "hscan", "sscan", "zscan",
-        "move", "rename", "renamenx", "restore", "persist", "pttl",
-        "dump", "object", "expireat", "pexpire", "pexpireat",
-        "migrate", "dump", "restore", "wait", "blpop", "brpop", "brpoplpush", "linsert", "lset", "ltrim",
-        "sinter", "sinterstore", "sunion", "sunionstore", "sdiff", "sdiffstore",
-        "zinterstore", "zunionstore", "zincrby", "zrank", "zrevrank",
-        "hstrlen", "hmget", "hexists", "hlen", "hrandfield", "pfadd", "pfcount", "pfmerge",
-        "geodist", "geohash", "geopos", "georadiusbymember", "xadd", "xdel", "xlen", "xrange",
-        "xrevrange", "xgroup", "xread", "ts", "json", "ft", "function",
-    ].iter().cloned().collect();
-
-    let max_word_len = known_commands.iter().map(|c| c.len()).max().unwrap_or(10);
-    let arc_known_commands = Arc::new(known_commands);
+    let max_word_len = KNOWN_COMMANDS.iter().map(|c| c.len()).max().unwrap_or(10);
     let arc_data_handler = Arc::new(DataHandlerSettings::new(&settings));
     let arc_settings = Arc::new(settings.clone());
 
@@ -405,7 +407,6 @@ pub async fn run_server(settings: Settings) {
         let stat_save_iter = settings.stat_save_iter;
         let udp_targets = settings.udp_targets.clone();
         let tcp_targets = settings.tcp_targets.clone();
-        let local_known_commands = arc_known_commands.clone();
         let data_handler = arc_data_handler.clone();
         let (service_in_channel_size, service_out_channel_size) = settings.channel_size();
         let close_delay = settings.collect_message_timeout(true);
@@ -426,7 +427,7 @@ pub async fn run_server(settings: Settings) {
             let mut cmd_buf = vec![0u8; CMD_BUF_SIZE];
             let mut to_close = false;
             let mut true_client = false;
-            let mut latest_quit = false;
+            let mut latest_quit = true;
             let idle_tcp_limit = arc_settings.idle_tcp_limit;
             let idle_udp_limit = arc_settings.idle_udp_limit;
             let mut idle_limit = idle_tcp_limit;
@@ -473,7 +474,7 @@ pub async fn run_server(settings: Settings) {
                                             } else if lower_cmd == "quit" {
                                                 to_close = true;
                                                 "+OK\r\n".to_string()
-                                            } else if local_known_commands.contains(lower_cmd.as_str()) {
+                                            } else if KNOWN_COMMANDS.contains(lower_cmd.as_str()) {
                                                 scan_attempt += 1;
                                                 update_metric(&format!("scan-{}", ip_str), scan_attempt).await;
                                                 format!("-ERR wrong number of arguments for '{}' command\r\n", lower_cmd).to_string()
@@ -630,7 +631,7 @@ pub async fn run_server(settings: Settings) {
                 );
                 let _ = settings_out.send(settings_item).await;
                 close_delay
-            } else if !latest_quit{
+            } else if !latest_quit {
                 let quit_msg = data_handler.make_quit_message(&cur_service, &cur_transfer_id);
                 match client_out.send(quit_msg).await {
                     Ok(_) => close_delay,

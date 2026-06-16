@@ -664,6 +664,9 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<()>) {
 
 /// Runs both TCP and UDP client processing tasks.
 pub async fn run(settings: Settings, tasks: &mut JoinSet<()>) {
+    if settings.tcp_sockets.is_empty() || settings.udp_sockets.is_empty() {
+        std::process::exit(1);
+    }
     tcp_client_processing(&settings, tasks).await;
     udp_client_processing(&settings, tasks).await;
 }
