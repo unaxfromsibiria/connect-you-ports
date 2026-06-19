@@ -61,7 +61,7 @@ async fn handle_target_tcp_transfering(
     let mut read_buffer = vec![0u8; buffer_size];
     let serv = format!("{} ({}) - {}:{}", service_name, part_uuid(&service_code), target_host, target_port);
     let idle_limit = settings.idle_tcp_limit;
-    let with_quit;
+    let mut with_quit = "".to_string();
     let wait_before_close_time = settings.collect_message_timeout(true);
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
     let stat_key = format!("out-total-{}", service_name);
@@ -84,7 +84,6 @@ async fn handle_target_tcp_transfering(
                             Err(err) => {
                                 error_count += 1;
                                 debug!("Failed to forward data to client {} in {}: {}", transfer, serv, err);
-                                with_quit = "".to_string();
                                 break;
                             }
                         }
@@ -117,6 +116,7 @@ async fn handle_target_tcp_transfering(
                     update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
                     (in_bytes, out_bytes, error_count) = (0, 0, 0);
                 }
+                break;
             }
         }
     }
