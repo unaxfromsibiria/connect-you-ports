@@ -32,6 +32,105 @@ static KNOWN_COMMANDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {[
     "xrevrange", "xgroup", "xread", "ts", "json", "ft", "function",
 ].into_iter().collect()});
 
+/// Extracts service code, target IP/port, and data size from the provided buffer.
+fn extract_code(
+    buf: &[u8],
+    n: usize,
+    tcp_targets: &IpPortMap,
+    udp_targets: &IpPortMap,
+) -> (Uuid, String, Option<std::net::IpAddr>, Option<u16>, bool, usize) {
+    let mut cursor = 0;
+    while cursor < n && buf[cursor].is_ascii_alphanumeric() {
+        cursor += 1;
+    }
+    while cursor < n && buf[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    let code_start = cursor;
+    while cursor < n && (buf[cursor].is_ascii_alphanumeric()) {
+        cursor += 1;
+    }
+    let code_end = cursor;
+    if code_start == code_end {
+        return (Uuid::nil(), String::new(), None, None, false, 0);
+    }
+    let service_code_str = match std::str::from_utf8(&buf[code_start..code_end]) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            return (Uuid::nil(), String::new(), None, None, false, 0)
+        },
+    };
+    let service_code = match Uuid::parse_str(&service_code_str) {
+        Ok(val) => val,
+        Err(_) => {
+            warn!("Incorrect service code {}", service_code_str);
+            return (Uuid::nil(), String::new(), None, None, false, 0)
+        }
+    };
+
+    let expect_data_size: usize;
+    if code_end + 5 <= buf.len() {
+        let size_bytes = &buf[code_end + 1..code_end + 5];
+        expect_data_size = u32::from_le_bytes(size_bytes.try_into().unwrap()) as usize;
+    } else {
+        // Not enough bytes to read a u32
+        return (Uuid::nil(), String::new(), None, None, false, 0);
+    }
+
+    for (name, ip_map) in tcp_targets {
+        if code_name(&name) == service_code {
+            if let Some((ip, &port)) = ip_map.iter().next() {
+                return (service_code, name.clone(), Some(ip.clone()), Some(port), false, expect_data_size);
+            }
+        }
+    }
+
+    for (name, ip_map) in udp_targets {
+        if code_name(name.as_str()) == service_code {
+            if let Some((ip, &port)) = ip_map.iter().next() {
+                return (service_code, name.clone(), Some(ip.clone()), Some(port), true, expect_data_size);
+            }
+        }
+    }
+
+    (Uuid::nil(), String::new(), None, None, false, 0)
+}
+
+/// Analyzes the initial buffer to determine if it's a known command or a protocol start.
+/// Returns (response_string, should_close, scan_increment)
+fn analyze_initial_command(
+    cmd_buf: &[u8],
+    n: usize,
+    max_word_len: usize,
+) -> (String, bool, usize) {
+    let part_len = (max_word_len + 1).min(n);
+    let part = &cmd_buf[..part_len];
+    let mut cmd_end_idx = part.len();
+
+    for (i, &ch) in part.iter().enumerate() {
+        if !ch.is_ascii_alphanumeric() && ch != b'_' {
+            cmd_end_idx = i;
+            break;
+        }
+    }
+
+    let potential_cmd = &cmd_buf[..cmd_end_idx];
+    match std::str::from_utf8(potential_cmd) {
+        Ok(cmd_str) => {
+            let lower_cmd = cmd_str.to_lowercase();
+            if lower_cmd == "set" {
+                (String::new(), false, 0)
+            } else if lower_cmd == "quit" {
+                ("+OK\r\n".to_string(), true, 0)
+            } else if KNOWN_COMMANDS.contains(lower_cmd.as_str()) {
+                (format!("-ERR wrong number of arguments for '{}' command\r\n", lower_cmd), false, 1)
+            } else {
+                ("-NOAUTH Authentication required.\r\n".to_string(), false, 0)
+            }
+        }
+        Err(_) => ("-NOAUTH Authentication required.\r\n".to_string(), true, 0),
+    }
+}
 
 /// Handles data forwarding between a client and a TCP target service
 async fn handle_target_tcp_transfering(
@@ -307,70 +406,6 @@ async fn start_service_connection(
     }
 }
 
-/// Extracts service code, target IP/port, and data size from the provided buffer.
-fn extract_code(
-    buf: &[u8],
-    n: usize,
-    tcp_targets: &IpPortMap,
-    udp_targets: &IpPortMap,
-) -> (Uuid, String, Option<std::net::IpAddr>, Option<u16>, bool, usize) {
-    let mut cursor = 0;
-    while cursor < n && buf[cursor].is_ascii_alphanumeric() {
-        cursor += 1;
-    }
-    while cursor < n && buf[cursor].is_ascii_whitespace() {
-        cursor += 1;
-    }
-    let code_start = cursor;
-    while cursor < n && (buf[cursor].is_ascii_alphanumeric()) {
-        cursor += 1;
-    }
-    let code_end = cursor;
-    if code_start == code_end {
-        return (Uuid::nil(), String::new(), None, None, false, 0);
-    }
-    let service_code_str = match std::str::from_utf8(&buf[code_start..code_end]) {
-        Ok(s) => s.to_string(),
-        Err(_) => {
-            return (Uuid::nil(), String::new(), None, None, false, 0)
-        },
-    };
-    let service_code = match Uuid::parse_str(&service_code_str) {
-        Ok(val) => val,
-        Err(_) => {
-            warn!("Incorrect service code {}", service_code_str);
-            return (Uuid::nil(), String::new(), None, None, false, 0)
-        }
-    };
-
-    let expect_data_size: usize;
-    if code_end + 5 <= buf.len() {
-        let size_bytes = &buf[code_end + 1..code_end + 5];
-        expect_data_size = u32::from_le_bytes(size_bytes.try_into().unwrap()) as usize;
-    } else {
-        // Not enough bytes to read a u32
-        return (Uuid::nil(), String::new(), None, None, false, 0);
-    }
-
-    for (name, ip_map) in tcp_targets {
-        if code_name(&name) == service_code {
-            if let Some((ip, &port)) = ip_map.iter().next() {
-                return (service_code, name.clone(), Some(ip.clone()), Some(port), false, expect_data_size);
-            }
-        }
-    }
-
-    for (name, ip_map) in udp_targets {
-        if code_name(name.as_str()) == service_code {
-            if let Some((ip, &port)) = ip_map.iter().next() {
-                return (service_code, name.clone(), Some(ip.clone()), Some(port), true, expect_data_size);
-            }
-        }
-    }
-
-    (Uuid::nil(), String::new(), None, None, false, 0)
-}
-
 /// Starts the main server loop, accepting incoming TCP connections
 /// and spawning tasks to handle client communication and data transfer.
 pub async fn run_server(settings: Settings) {
@@ -455,38 +490,15 @@ pub async fn run_server(settings: Settings) {
                                 response = if true_client {
                                      String::new()
                                 } else {
-                                    let part_len = (max_word_len + 1).min(n);
-                                    let part = &cmd_buf[..part_len];
-                                    let mut cmd_end_idx = part.len();
-                                    
-                                    for (i, &ch) in part.iter().enumerate() {
-                                        if !ch.is_ascii_alphanumeric() && ch != b'_' {
-                                            cmd_end_idx = i;
-                                            break;
-                                        }
+                                    let (res_str, should_close, scan_inc) = analyze_initial_command(&cmd_buf, n, max_word_len);
+                                    if should_close {
+                                        to_close = true;
                                     }
-                                    let potential_cmd = &cmd_buf[..cmd_end_idx];
-                                    match std::str::from_utf8(potential_cmd) {
-                                        Ok(cmd_str) => {
-                                            let lower_cmd = cmd_str.to_lowercase();
-                                            if lower_cmd == "set" {
-                                                String::new()
-                                            } else if lower_cmd == "quit" {
-                                                to_close = true;
-                                                "+OK\r\n".to_string()
-                                            } else if KNOWN_COMMANDS.contains(lower_cmd.as_str()) {
-                                                scan_attempt += 1;
-                                                update_metric(&format!("scan-{}", ip_str), scan_attempt).await;
-                                                format!("-ERR wrong number of arguments for '{}' command\r\n", lower_cmd).to_string()
-                                            } else {
-                                                "-NOAUTH Authentication required.\r\n".to_string()
-                                            }
-                                        }
-                                        Err(_) => {
-                                            to_close = true;
-                                            "-NOAUTH Authentication required.\r\n".to_string()
-                                        }
+                                    if scan_inc > 0 {
+                                        scan_attempt += scan_inc;
+                                        update_metric(&format!("scan-{}", ip_str), scan_attempt).await;
                                     }
+                                    res_str
                                 };
                                 // server try to process
                                 if response.is_empty() {
@@ -650,5 +662,74 @@ pub async fn run_server(settings: Settings) {
             info!("Connection closed from {}", peer_addr);
             sleep(and_wait).await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_analyze_initial_command() {
+        let buf = b"ping\r\n";
+        let (resp, close, inc) = analyze_initial_command(buf, buf.len(), 64);
+        assert!(resp.contains("-ERR"));
+        assert!(!close);
+        assert_eq!(inc, 1);
+    }
+
+    #[test]
+    fn test_extract_code() {
+        let mut tcp_targets = HashMap::new();
+        let mut udp_targets = HashMap::new();
+        // 1. Setup TCP Service
+        let tcp_name = "tcp_service";
+        let tcp_uuid = code_name(tcp_name);
+        let tcp_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let tcp_port = 8080;
+        let mut tcp_ports = HashMap::new();
+        tcp_ports.insert(tcp_ip, tcp_port);
+        tcp_targets.insert(tcp_name.to_string(), tcp_ports);
+        // 2. Setup UDP Service
+        let udp_name = "udp_service";
+        let udp_uuid = code_name(udp_name);
+        let udp_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1));
+        let udp_port = 9000;
+        let mut udp_ports = HashMap::new();
+        udp_ports.insert(udp_ip, udp_port);
+        udp_targets.insert(udp_name.to_string(), udp_ports);
+        // --- Stage 1: Test TCP lookup ---
+        let mut buf_tcp = Vec::new();
+        buf_tcp.extend_from_slice(b"SET "); 
+        buf_tcp.extend_from_slice(tcp_uuid.simple().to_string().as_bytes());
+        buf_tcp.push(b' '); 
+        buf_tcp.extend_from_slice(&100u32.to_le_bytes());
+
+        let (u1, n1, ip1, p1, udp1, s1) = extract_code(
+            &buf_tcp, buf_tcp.len(), &tcp_targets, &udp_targets
+        );
+        assert_eq!(u1, tcp_uuid);
+        assert_eq!(n1, tcp_name);
+        assert_eq!(ip1, Some(tcp_ip));
+        assert_eq!(p1, Some(tcp_port));
+        assert!(!udp1, "Should be TCP");
+        assert_eq!(s1, 100);
+        // --- Stage 2: Test UDP lookup ---
+        let mut buf_udp = Vec::new();
+        buf_udp.extend_from_slice(b"SET "); 
+        buf_udp.extend_from_slice(udp_uuid.simple().to_string().as_bytes());
+        buf_udp.push(b' '); 
+        buf_udp.extend_from_slice(&200u32.to_le_bytes());
+
+        let (u2, n2, ip2, p2, udp2, s2) =  extract_code(
+            &buf_udp, buf_udp.len(), &tcp_targets, &udp_targets
+        );
+        assert_eq!(u2, udp_uuid);
+        assert_eq!(n2, udp_name);
+        assert_eq!(ip2, Some(udp_ip));
+        assert_eq!(p2, Some(udp_port));
+        assert!(udp2, "Should be UDP");
+        assert_eq!(s2, 200);
     }
 }

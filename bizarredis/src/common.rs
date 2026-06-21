@@ -297,10 +297,10 @@ impl LoadingParams for Settings {
     /// Returns the channel size configuration based on the loading level
     fn channel_size(&self) -> (usize, usize) {
         match self.loading_level {
-            LoadingLevelEnum::Default => (1024 * 2, 1024 * 2),
-            LoadingLevelEnum::High => (1024 * 4, 1024 * 4),
-            LoadingLevelEnum::Extremely => (1024 * 5, 1024 * 4),
-            LoadingLevelEnum::Low => (1024 * 2, 1024 * 2),
+            LoadingLevelEnum::Default => (500, 500),
+            LoadingLevelEnum::High => (800, 600),
+            LoadingLevelEnum::Extremely => (1000, 800),
+            LoadingLevelEnum::Low => (400, 400),
         }
     }
 
