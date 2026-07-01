@@ -5,7 +5,7 @@ use serde::{Serialize, Deserialize};
 use hex::decode;
 use uuid::fmt::Simple;
 use uuid::Uuid;
-use aes_gcm::{Aes256Gcm, Nonce, Key, aead::{Aead, AeadCore, KeyInit, OsRng}};
+use aes_gcm::{aead::{Aead, Generate, Key, KeyInit}, Aes256Gcm, Nonce};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DataMsg {
@@ -69,8 +69,14 @@ impl DataHandler for DataHandlerSettings {
             if key_bytes.is_empty() {
                 return handler;
             }
-            let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
-            let cipher = Aes256Gcm::new(key);
+            let key = match Key::<Aes256Gcm>::try_from(&key_bytes[..]) {
+                Ok(k) => k,
+                Err(_) => {
+                    error!("Incorrect Aes256Gcm key length");
+                    return handler;
+                }
+            };
+            let cipher = Aes256Gcm::new(&key);
             handler.cipher = Some(cipher);
             handler.encryption = true;
             info!("Using Aes-256-Gcm encryption");
@@ -83,7 +89,7 @@ impl DataHandler for DataHandlerSettings {
         let msg_data;
         let n: Vec<u8>;
         if self.encryption && let Some(cipher) = &self.cipher {       
-            let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+            let nonce = Nonce::generate();
             n = nonce.to_vec();
             match cipher.encrypt(&nonce, data) {
                 Ok(res) => msg_data = res,
@@ -120,7 +126,15 @@ impl DataHandler for DataHandlerSettings {
         match bincode::deserialize::<DataMsg>(data) {
             Ok(mut msg) => {
                 if self.encryption && !msg.n.is_empty() {
-                    let nonce = Nonce::from_slice(&msg.n);
+                    let nonce = match Nonce::try_from(&msg.n[..]) {
+                        Ok(n) => n,
+                        Err(_) => {
+                            let err_msg = "Invalid nonce length".to_string();
+                            error!("{}", err_msg);
+                            return Err(err_msg);
+                        }
+                    };
+                    
                     if let Some(cipher) = &self.cipher {
                         match cipher.decrypt(&nonce, msg.d.as_slice()) {
                             Ok(res) => {
@@ -292,5 +306,37 @@ mod tests {
         let result = handler.load_data_message(&corrupted_data);
         
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encryption_nonce_uniqueness() {
+        let settings = TestEncryptionData { key: VALID_KEY.to_string() };
+        let handler = DataHandlerSettings::new(&settings);
+        assert!(handler.encryption, "Encryption should be enabled for this test");
+        let data = b"Repeated Secret Message".to_vec();
+        let service = get_uuid();
+        let transfer = get_uuid();
+
+        let msg1 = handler.make_data_message(&data, &service, &transfer);
+        let msg2 = handler.make_data_message(&data, &service, &transfer);
+
+        assert!(!msg1.n.is_empty(), "Nonce should not be empty for encrypted message");
+        assert!(!msg2.n.is_empty(), "Nonce should not be empty for encrypted message");
+
+        assert_ne!(
+            msg1.n, msg2.n,
+            "Nonces must be unique for each encryption operation even with identical input data"
+        );
+
+        assert_ne!(
+            msg1.d, msg2.d,
+            "Ciphertexts must be different for identical plaintexts due to unique nonces"
+        );
+        let (_, serialized1) = msg1.dump(false);
+        let loaded1 = handler.load_data_message(&serialized1).unwrap();
+        assert_eq!(loaded1.d, data);
+        let (_, serialized2) = msg2.dump(false);
+        let loaded2 = handler.load_data_message(&serialized2).unwrap();
+        assert_eq!(loaded2.d, data);
     }
 }

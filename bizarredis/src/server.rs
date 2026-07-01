@@ -32,6 +32,11 @@ static KNOWN_COMMANDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {[
     "xrevrange", "xgroup", "xread", "ts", "json", "ft", "function",
 ].into_iter().collect()});
 
+fn extract_two_bytes_as_u16(transfer: Uuid) -> u16 {
+    let bytes = transfer.as_bytes();
+    ((bytes[0] as u16) << 8) | (bytes[1] as u16)
+}
+
 /// Extracts service code, target IP/port, and data size from the provided buffer.
 fn extract_code(
     buf: &[u8],
@@ -263,10 +268,15 @@ async fn handle_target_udp_transfering(
     target_port: u16,
     data_handler: Arc<DataHandlerSettings>,
 ) {
-    let udp_bind_from = match SocketAddr::from_str(&settings.udp_bind_from) {
-        Ok(addr_new) => addr_new,
+    let start_port = extract_two_bytes_as_u16(transfer);
+    let udp_bind_from_str = &settings.udp_bind_from;
+    let udp_bind_from = match SocketAddr::from_str(udp_bind_from_str) {
+        Ok(addr) => {
+            // Create a new SocketAddr with the same IP but the new port
+            SocketAddr::new(addr.ip(), start_port)
+        },
         Err(err) => {
-            error!("Incorrect address in settings {}: {}", settings.udp_bind_from, err);
+            error!("Incorrect address in settings {}: {}", udp_bind_from_str, err);
             return;
         }
     };
@@ -731,5 +741,20 @@ mod tests {
         assert_eq!(p2, Some(udp_port));
         assert!(udp2, "Should be UDP");
         assert_eq!(s2, 200);
+    }
+
+    #[test]
+    fn test_extract_two_bytes_as_u16() {
+        let uuid = Uuid::parse_str("12345678-9abc-def0-1234-56789abcdef0").unwrap();
+        assert_eq!(extract_two_bytes_as_u16(uuid), 0x1234);
+
+        let uuid = Uuid::parse_str("00005678-9abc-def0-1234-56789abcdef0").unwrap();
+        assert_eq!(extract_two_bytes_as_u16(uuid), 0x0000);
+
+        let uuid = Uuid::parse_str("ffff5678-9abc-def0-1234-56789abcdef0").unwrap();
+        assert_eq!(extract_two_bytes_as_u16(uuid), 0xFFFF);
+
+        let uuid = Uuid::parse_str("01ff5678-9abc-def0-1234-56789abcdef0").unwrap();
+        assert_eq!(extract_two_bytes_as_u16(uuid), 0x01FF);
     }
 }
