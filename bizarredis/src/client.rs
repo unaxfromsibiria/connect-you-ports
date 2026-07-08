@@ -37,6 +37,7 @@ async fn server_data_processing(
     let buffer_size_limit = settings.buffer_size * 3;
     let stat_save_iter = settings.stat_save_iter;
     let service_conn_name = format!("to-server-{}", service_name);
+    let min_delay = settings.service_delay();
     let mut init_try = true; 
     let mut skip_reconnect = true;
     let mut reconnection_count = 0;
@@ -58,6 +59,12 @@ async fn server_data_processing(
                     reconnect_delay = settings.reconnect_delay(reconnection_count);
                     update_metric(&format!("{}-reconnection", service_name), reconnection_count).await;
                     info!("Reconnection for {}", serv);
+                    match to_client_channel.send((Uuid::nil(), Bytes::new())).await {
+                        Ok(_) => {},
+                        Err(err) => {
+                            error!("In reconnection case failed to send data to client channel for {}: {}", serv, err);
+                        }
+                    }
                 }
                 tokio::io::split(stream)
             },
@@ -135,6 +142,9 @@ async fn server_data_processing(
                                     }
                                     if msg.x {
                                         info!("Connection closed by client request for {}", serv);
+                                        if !skip_reconnect {
+                                            sleep(min_delay).await;
+                                        }
                                         break;
                                     }
                                 },
@@ -475,6 +485,11 @@ async fn handle_udp_connection(
                 }
             },
             Some((transfer_id, data)) = from_client_channel.recv() => {
+                if transfer_id.is_nil() {
+                    sleep(min_delay).await;
+                    info!("Peer list is cleared for {} after reconnection", transfer_id);
+                    continue;
+                }
                 if data.is_empty() {
                     info!("Closing UDP transfer for client {} by request", transfer_id);
                     continue;
@@ -491,7 +506,7 @@ async fn handle_udp_connection(
                         }
                     };
                 } else {
-                    warn!("Unknown peer for UDP transfer {} in service {}", transfer_id, service_name);
+                    warn!("Unknown peer (or waiting) for UDP transfer {} in service {}", transfer_id, service_name);
                 }
             },
             _ = sleep(stat_save_iter) => {

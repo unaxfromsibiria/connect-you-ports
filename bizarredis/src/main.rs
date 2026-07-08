@@ -4,13 +4,15 @@ mod data;
 mod stat;
 mod server;
 
-use tokio::time::{Instant, sleep};
-use tokio::{runtime::Builder, task::JoinSet};
 use common::{Settings, create_settings};
 use client::run as run_client;
+use log::{info, error};
+use memory_stats::memory_stats;
 use stat::{show_stats, update_metric};
 use server::run_server;
-use log::{info, error};
+use tokio::time::{Instant, sleep};
+use tokio::{runtime::Builder, task::JoinSet};
+
 
 /// Starts the server task within the provided JoinSet.
 async fn server(settings: Settings, tasks: &mut JoinSet<()>) {
@@ -45,6 +47,10 @@ async fn run(settings: &Settings) -> Result<(), Box<dyn std::error::Error>> {
             let elapsed = start_time.elapsed();
             let uptime_min = elapsed.as_secs() / 60;
             update_metric("uptime", uptime_min as usize).await;
+            if let Some(usage) = memory_stats() {
+                update_metric("physical_mem_kb", (usage.physical_mem / 1024) as usize).await;
+                update_metric("virtual_mem_kb", (usage.virtual_mem / 1024) as usize).await;
+            }
             show_stats().await;
         }
     });

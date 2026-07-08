@@ -32,9 +32,21 @@ static KNOWN_COMMANDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {[
     "xrevrange", "xgroup", "xread", "ts", "json", "ft", "function",
 ].into_iter().collect()});
 
-fn extract_two_bytes_as_u16(transfer: Uuid) -> u16 {
+
+fn create_outbound_port(transfer: Uuid, with_delta: bool) -> u16 {
     let bytes = transfer.as_bytes();
-    ((bytes[0] as u16) << 8) | (bytes[1] as u16)
+    let four_bytes_val = (
+            (bytes[0] as u32) << 24
+        ) | (
+            (bytes[1] as u32) << 16
+        ) | (
+            (bytes[2] as u32) << 8
+        ) | (bytes[3] as u32);
+
+    let range_size = (u16::MAX as u32) - 256;
+    let remainder = four_bytes_val % range_size;
+    let random_shift = if with_delta {rand::random_range(0..32)} else {0};
+    (remainder + 255 - if with_delta {16} else {0} + random_shift) as u16
 }
 
 /// Extracts service code, target IP/port, and data size from the provided buffer.
@@ -268,7 +280,7 @@ async fn handle_target_udp_transfering(
     target_port: u16,
     data_handler: Arc<DataHandlerSettings>,
 ) {
-    let start_port = extract_two_bytes_as_u16(transfer);
+    let start_port = create_outbound_port(transfer, true);
     let udp_bind_from_str = &settings.udp_bind_from;
     let udp_bind_from = match SocketAddr::from_str(udp_bind_from_str) {
         Ok(addr) => {
@@ -287,6 +299,13 @@ async fn handle_target_udp_transfering(
         },
         Err(err) => {
             error!("Error binding UDP socket {} for {} service {}: {}", udp_bind_from, transfer, service_code, err);
+            let msg = data_handler.make_quit_message(&service_code, &transfer);
+            match out_channel.send(msg).await {
+                Ok(_) => {},
+                Err(err) => {
+                    warn!("Failed to send quit message to client {} after busy UDP {}: {}", transfer, udp_bind_from, err);
+                }
+            }
             return;
         }
     };
@@ -294,7 +313,7 @@ async fn handle_target_udp_transfering(
     let idle_limit = settings.idle_udp_limit;
     let mut read_buffer = vec![0u8; buffer_size];
     let serv = format!("{} ({}) - {}:{}", service_name, service_code, target_host, target_port);
-    let mut with_quit;
+    let mut with_quit = "".to_string();
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
     let target_addr = (target_host, target_port);
     let stat_key = format!("out-total-{}", service_name);
@@ -319,7 +338,7 @@ async fn handle_target_udp_transfering(
                             Err(err) => {
                                 error_count += 1;
                                 error!("Failed to forward data to client {} in {}: {}", transfer, serv, err);
-                                continue;
+                                break;
                             }
                         }
                     },
@@ -359,7 +378,7 @@ async fn handle_target_udp_transfering(
             }
         }
     }
-
+    drop(socket);
     // Ensure quit message is logged and sent even if with_quit was not set by a specific break condition
     if with_quit.is_empty() {
         with_quit = format!("Connection {} closed unexpectedly", serv);
@@ -744,17 +763,41 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_two_bytes_as_u16() {
-        let uuid = Uuid::parse_str("12345678-9abc-def0-1234-56789abcdef0").unwrap();
-        assert_eq!(extract_two_bytes_as_u16(uuid), 0x1234);
+    fn test_create_outbound_port() {
+        let uuid_min = Uuid::parse_str("0000fffc-9abc-def0-1234-56789abcdef0").unwrap();
+        let mid_val = create_outbound_port(uuid_min, false);
+        assert!(create_outbound_port(uuid_min, true) < mid_val + 16 && create_outbound_port(uuid_min, true) >= mid_val - 16);
+        let uuid_max = Uuid::parse_str("0000fffb-9abc-def0-1234-56789abcdef0").unwrap();
+        assert!(create_outbound_port(uuid_max, true) < mid_val + 16 && create_outbound_port(uuid_max, true) >= mid_val - 16);
+        assert_eq!(mid_val, 508);
+        let uuid_1 = Uuid::parse_str("8d6b1038-8f59-47b2-88d8-1eb5d312dee6").unwrap();
+        let mid_val_1 = create_outbound_port(uuid_1, false);
+        assert!(create_outbound_port(uuid_1, true) < mid_val_1 + 16 && create_outbound_port(uuid_1, true) >= mid_val_1 - 16);
+        assert_eq!(mid_val_1, 38960);
 
-        let uuid = Uuid::parse_str("00005678-9abc-def0-1234-56789abcdef0").unwrap();
-        assert_eq!(extract_two_bytes_as_u16(uuid), 0x0000);
+        let uuid_2 = Uuid::parse_str("00005678-9abc-def0-1234-56789abcdef0").unwrap();
+        let mid_val_2 = create_outbound_port(uuid_2, false);
+        assert!(create_outbound_port(uuid_2, true) < mid_val_2 + 16 && create_outbound_port(uuid_2, true) >= mid_val_2 - 16);
+        assert_eq!(mid_val_2, 22391);
 
-        let uuid = Uuid::parse_str("ffff5678-9abc-def0-1234-56789abcdef0").unwrap();
-        assert_eq!(extract_two_bytes_as_u16(uuid), 0xFFFF);
+        let uuid_3 = Uuid::parse_str("ffff5678-9abc-def0-1234-56789abcdef0").unwrap();
+        let mid_val_3 = create_outbound_port(uuid_3, false);
+        assert!(create_outbound_port(uuid_3, true) < mid_val_3 + 16 && create_outbound_port(uuid_3, true) >= mid_val_3 - 16);
+        assert_eq!(mid_val_3, 22904);
 
-        let uuid = Uuid::parse_str("01ff5678-9abc-def0-1234-56789abcdef0").unwrap();
-        assert_eq!(extract_two_bytes_as_u16(uuid), 0x01FF);
+        let uuid_4 = Uuid::parse_str("01ff5678-9abc-def0-1234-56789abcdef0").unwrap();
+        let mid_val_4 = create_outbound_port(uuid_4, false);
+        assert!(create_outbound_port(uuid_4, true) < mid_val_4 + 16 && create_outbound_port(uuid_4, true) >= mid_val_4 - 16);
+        assert_eq!(mid_val_4, 23160);
+
+        let uuid_5 = Uuid::parse_str("89606edc-e72c-4a00-2b14-3bfbb4365a78").unwrap();
+        let mid_val_5 = create_outbound_port(uuid_5, false);
+        assert!(create_outbound_port(uuid_5, true) < mid_val_5 + 16 && create_outbound_port(uuid_5, true) >= mid_val_5 - 16);
+        assert_eq!(mid_val_5, 58309);
+
+        let uuid_6 = Uuid::parse_str("5aa1976e-ca1f-ee4e-35c7-b71ec8e8a0eb").unwrap();
+        let mid_val_6 = create_outbound_port(uuid_6, false);
+        assert!(create_outbound_port(uuid_6, true) < mid_val_6 + 16 && create_outbound_port(uuid_6, true) >= mid_val_6 - 16);
+        assert_eq!(mid_val_6, 61289);
     }
 }
