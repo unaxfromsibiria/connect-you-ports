@@ -4,6 +4,7 @@ use tokio::net::{TcpStream, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 use once_cell::sync::Lazy;
+use socket2::SockRef;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -468,6 +469,12 @@ pub async fn run_server(settings: Settings) {
             warn!("Current TTL is {}", stream.ttl().unwrap());
         }
         stream.set_nodelay(true).unwrap();
+        let socket_ref = SockRef::from(&stream);
+        let buffer_size_limit = settings.buffer_size * 3;
+        let s_buffer_size = settings.socket_recv_buffer_size();
+        if s_buffer_size > 0 {
+            socket_ref.set_recv_buffer_size(s_buffer_size).unwrap();
+        }
         let stat_save_iter = settings.stat_save_iter;
         let udp_targets = settings.udp_targets.clone();
         let tcp_targets = settings.tcp_targets.clone();
@@ -499,7 +506,6 @@ pub async fn run_server(settings: Settings) {
             let mut cur_service = Uuid::nil();
             let mut cur_transfer_id = Uuid::nil();
             let ip_str = peer_addr.ip().to_string();
-            let buffer_size_limit = arc_settings.buffer_size * 3;
             let mut stat_key = format!("unknown-{}", ip_str);
             let mut wrong_attempt = 0;
             let mut scan_attempt = 0;

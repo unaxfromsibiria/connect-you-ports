@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      RUST_LOG: "info"
+      RUST_LOG: "warn"
       SERVER: "0"
       LOADING_LEVEL: "high"
       WORKERS: "4"

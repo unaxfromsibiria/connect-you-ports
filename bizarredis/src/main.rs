@@ -33,6 +33,7 @@ async fn run(settings: &Settings) -> Result<(), Box<dyn std::error::Error>> {
     );
     info!("Client: {} | Target: {}", settings.client_name, target);
     let mut set = JoinSet::new();
+    let stat_filepath = settings.stat_filepath.clone();
     let settings = settings.clone();
     if is_s {
         server(settings, &mut set).await;
@@ -51,7 +52,7 @@ async fn run(settings: &Settings) -> Result<(), Box<dyn std::error::Error>> {
                 update_metric("physical_mem_kb", (usage.physical_mem / 1024) as usize).await;
                 update_metric("virtual_mem_kb", (usage.virtual_mem / 1024) as usize).await;
             }
-            show_stats().await;
+            show_stats(&stat_filepath).await;
         }
     });
 

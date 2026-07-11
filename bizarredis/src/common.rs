@@ -18,6 +18,7 @@ const ENV_BUFFER_SIZE: &str = "READ_BUFFER_SIZE";
 const ENV_TCP_SOCKETS: &str = "TCP_SOCKETS";
 const ENV_UDP_SOCKETS: &str = "UDP_SOCKETS";
 const ENV_STAT_SHOW_INTERVAL: &str = "STAT_SHOW_INTERVAL";
+const ENV_STAT_FILE: &str = "STAT_FILE";
 const ENV_TCP_TARGET: &str = "SERVER_TCP_TARGET";
 const ENV_UDP_TARGET: &str = "SERVER_UDP_TARGET";
 const ENV_KEY_CIPHER: &str = "CRYPTO_KEY";
@@ -233,6 +234,7 @@ pub struct Settings {
     pub buffer_size: usize,
     pub stat_delay: Duration,
     pub stat_save_iter: Duration,
+    pub stat_filepath: String,
     pub client_name: String,
     pub tcp_sockets: IpPortMap,
     pub udp_sockets: IpPortMap,
@@ -278,6 +280,7 @@ pub trait LoadingParams {
     fn channel_size(&self) -> (usize, usize);
     fn collect_message_timeout(&self, final_mode: bool) -> Duration;
     fn default_buffer_size(&self) -> usize;
+    fn socket_recv_buffer_size(&self) -> usize;
     fn service_delay(&self) -> Duration;
     fn reconnect_delay(&self, attempt: usize) -> Duration;
 }
@@ -292,6 +295,16 @@ impl LoadingParams for Settings {
             LoadingLevelEnum::Extremely => 8 * 1024,
             LoadingLevelEnum::Low => 4 * 1024
         }
+    }
+
+    /// Returns the socket receive buffer size based on the loading level
+    fn socket_recv_buffer_size(&self) -> usize {
+        1024 * (match self.loading_level {
+            LoadingLevelEnum::Default => 0,
+            LoadingLevelEnum::High => 65,
+            LoadingLevelEnum::Extremely => 96,
+            LoadingLevelEnum::Low => 0
+        })
     }
 
     /// Returns the channel size configuration based on the loading level
@@ -364,6 +377,13 @@ pub fn create_settings() -> Settings {
     if client_name.is_empty() {
         client_name = format!("{}-{}", if is_server {"s"} else {"c"}, fast_name());
     }
+    
+    // Added reading for stat_filepath with default value
+    let mut stat_filepath = _read_env_str(ENV_STAT_FILE, true);
+    if stat_filepath.is_empty() {
+        stat_filepath = "/tmp/stat.txt".to_string();
+    }
+
     let stat_delay = Duration::from_secs(_read_env_uint(ENV_STAT_SHOW_INTERVAL, true, 180) as u64);
     let stat_save_iter = Duration::from_secs(
         _read_env_uint(ENV_STAT_SAVE_INTERVAL, true, if is_server {2} else {1}) as u64
@@ -438,6 +458,7 @@ pub fn create_settings() -> Settings {
         udp_bind_from,
         loading_level,
         networks,
+        stat_filepath,
     };
     if settings.buffer_size < 1024 {
         settings.buffer_size = settings.default_buffer_size();
@@ -494,6 +515,7 @@ mod tests {
         let uuid2 = code_name("test2");
         assert_ne!(uuid1, uuid2);
     }
+
     #[test]
     fn test_create_settings_default_safe() {
         let settings = create_settings();
@@ -522,6 +544,8 @@ mod tests {
         assert_eq!(settings.cipher_key, "");
         assert!(!settings.udp_bind_from.is_empty() || settings.udp_bind_from == "0.0.0.0:0");
         assert!(settings.networks.is_empty());
+        // Updated test to check default stat_filepath
+        assert_eq!(settings.stat_filepath, "/tmp/stat.txt");
     }
 
     #[test]

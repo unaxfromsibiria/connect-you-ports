@@ -1,13 +1,14 @@
+use bytes::Bytes;
+use log::{info, error, debug, warn};
 use tokio::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use uuid::Uuid;
+use socket2::SockRef;
 use std::collections::HashMap;
 use std::sync::Arc;
-use bytes::Bytes;
-use log::{info, error, debug, warn};
+use uuid::Uuid;
 use crate::stat::{add_connection, lost_connection, update_metric, update_traffic_stats};
 use crate::data::{DataHandler, DataHandlerSettings};
 use crate::common::{OUT_TTL, Settings, LoadingParams, code_name, fast_name, part_uuid};
@@ -38,6 +39,7 @@ async fn server_data_processing(
     let stat_save_iter = settings.stat_save_iter;
     let service_conn_name = format!("to-server-{}", service_name);
     let min_delay = settings.service_delay();
+    let s_buffer_size = settings.socket_recv_buffer_size();
     let mut init_try = true; 
     let mut skip_reconnect = true;
     let mut reconnection_count = 0;
@@ -53,6 +55,10 @@ async fn server_data_processing(
                     warn!("Failed to set TTL, current TTL is {}", stream.ttl().unwrap_or(0));
                 }
                 stream.set_nodelay(true).unwrap();
+                let socket_ref = SockRef::from(&stream);
+                if s_buffer_size > 0 {
+                    socket_ref.set_recv_buffer_size(s_buffer_size).unwrap();
+                }
                 if !skip_reconnect {
                     get_size_problems = 0;
                     reconnection_count += 1;

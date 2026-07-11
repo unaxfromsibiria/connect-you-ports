@@ -1,7 +1,8 @@
 use tokio::sync::RwLock;
 use std::collections::HashMap;
-use log::info;
+use log::{info, error};
 use once_cell::sync::Lazy;
+use std::fs;
 
 struct Stat {
     // { service_name: (incoming, outgoing) }
@@ -23,8 +24,8 @@ impl Stat {
         }
     }
 
-    fn show(&self) {
-        info!("traffic:");
+    fn format_stats(&self) -> String {
+        let mut output = String::from("traffic:\n");
         for (key, (in_value, out_value)) in &self.traffic {
             let print_value = |value: usize| -> (f64, &'static str) {
                 if value >= 1024 * 1024 {
@@ -37,20 +38,25 @@ impl Stat {
             };
             let (in_val, in_unit) = print_value(*in_value);
             let (out_val, out_unit) = print_value(*out_value);
-            info!("  target {} in: {:.1} {} out: {:.1} {}", key, in_val, in_unit, out_val, out_unit);
+            output.push_str(&format!("  target {} in: {:.1} {} out: {:.1} {}\n", key, in_val, in_unit, out_val, out_unit));
         }
-        info!("connections:");
+
+        output.push_str("connections:\n");
         for (key, (total, lost)) in &self.connections {
-            info!("  target {} total: {} lost: {}", key, total, lost);
+            output.push_str(&format!("  target {} total: {} lost: {}\n", key, total, lost));
         }
-        info!("errors:");
+
+        output.push_str("errors:\n");
         for (key, error_count) in &self.errors {
-            info!("  target {} errors: {}", key, error_count);
+            output.push_str(&format!("  target {} errors: {}\n", key, error_count));
         }
-        info!("metrics:");
+
+        output.push_str("metrics:\n");
         for (key, value) in &self.metrics {
-            info!("  target {} value: {}", key, value);
+            output.push_str(&format!("  target {} value: {}\n", key, value));
         }
+
+        output
     }
 }
 
@@ -88,14 +94,19 @@ pub async fn update_traffic_stats(service: &str, in_bytes: usize, out_bytes: usi
     }
 }
 
-pub async fn show_stats() {
+pub async fn show_stats(filepath: &str) {
     let stat = GLOBAL_STAT.read().await;
-    stat.show();
+    let stats_content = stat.format_stats();
+    match fs::write(filepath, stats_content.as_bytes()) {
+        Ok(_) => info!("Statistics updated in file: {}", filepath),
+        Err(e) => error!("Failed to write statistics to file {}: {}", filepath, e),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[tokio::test]
     async fn test_add_connection_increases_current() {
@@ -154,9 +165,7 @@ mod tests {
         let stat = GLOBAL_STAT.write().await;
         let initial_errors = stat.errors.get(service).cloned().unwrap_or(0);
         drop(stat);
-
-        update_traffic_stats(service, 50, 100, 0).await; // 0 ошибок
-
+        update_traffic_stats(service, 50, 100, 0).await;
         let stat = GLOBAL_STAT.read().await;
         let errors = stat.errors.get(service).cloned().unwrap_or(0);
         assert_eq!(errors, initial_errors);
@@ -181,11 +190,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_show_stats_does_not_panic() {
+    async fn test_show_stats_writes_to_file() {
         let service = "test_service_6";
         add_connection(service).await;
         update_traffic_stats(service, 100, 200, 1).await;
         update_metric(service, 10).await;
-        show_stats().await;
+        let filepath = "/tmp/test_stats.txt";
+        let _ = fs::remove_file(filepath);
+        show_stats(filepath).await;
+        assert!(fs::metadata(filepath).is_ok(), "File should exist");
+        let content = fs::read_to_string(filepath).expect("Failed to read file");
+        assert!(content.contains("test_service_6"), "File should contain service name");
+        assert!(content.contains("traffic:"), "File should contain traffic section");
+        assert!(content.contains("connections:"), "File should contain connections section");
+        assert!(content.contains("errors:"), "File should contain errors section");
+        assert!(content.contains("metrics:"), "File should contain metrics section");
+        let _ = fs::remove_file(filepath);
     }
 }

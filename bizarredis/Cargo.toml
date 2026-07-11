@@ -1,10 +1,11 @@
 [package]
 name = "bizarredis"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 
 [dependencies]
 tokio = { version = "~1.52", features = ["full"] }
+socket2 = { version = "~0.6.4" }
 once_cell = { version = "~1.21.4" }
 env_logger = { version = "~0.11" }
 futures = { version = "~0.3" }
