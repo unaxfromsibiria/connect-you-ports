@@ -1,0 +1,1 @@
+place for libsocket_phone.so
