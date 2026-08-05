@@ -19,6 +19,7 @@ use stat::show_stats_sync;
 
 struct AppState {
     is_running: Mutex<bool>, 
+    last_error: Mutex<Option<String>>,
 }
 
 static APP_STATE: OnceLock<AppState> = OnceLock::new();
@@ -26,12 +27,20 @@ static APP_STATE: OnceLock<AppState> = OnceLock::new();
 fn get_state() -> &'static AppState {
     APP_STATE.get_or_init(|| AppState {
         is_running: Mutex::new(false),
+        last_error: Mutex::new(None),
     })
 }
 
 fn is_running() -> bool {
     let state = get_state();
     *state.is_running.lock().unwrap() == true
+}
+
+/// Retrieves the last error message and clears it from state.
+fn get_and_clear_last_error() -> String {
+    let state = get_state();
+    let mut error_lock = state.last_error.lock().unwrap();
+    std::mem::take(&mut *error_lock).unwrap_or_default()
 }
 
 fn init_android_logger() {
@@ -56,16 +65,24 @@ fn run_tokio_server(settings: Settings) {
             match result {
                 Ok(_) => {
                     info!("Service finished successfully");
+                    let mut err_lock = state.last_error.lock().unwrap();
+                    *err_lock = None;
                 },
                 Err(err) => {
-                    error!("Service failed with error: {:?}", err);
+                    let err_msg = format!("Service failed with error: {:?}", err);
+                    error!("{}", err_msg);
+                    let mut err_lock = state.last_error.lock().unwrap();
+                    *err_lock = Some(err_msg);
                     *state.is_running.lock().unwrap() = false;
                 },
             }
         },
         Err(e) => {
-            error!("Failed to create Tokio runtime: {}", e);
+            let err_msg = format!("Failed to create Tokio runtime: {}", e);
+            error!("{}", err_msg);
             let state = get_state();
+            let mut err_lock = state.last_error.lock().unwrap();
+            *err_lock = Some(err_msg);
             *state.is_running.lock().unwrap() = false;
         }
     }
@@ -73,7 +90,7 @@ fn run_tokio_server(settings: Settings) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_startServer(
-    mut env: JNIEnv,
+    mut _env: JNIEnv,
     _class: JClass,
     host_jstr: JString,
     port_jint: i32,
@@ -83,28 +100,28 @@ pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_star
     verbose_jboolean: jboolean,
 ) {
     init_android_logger();
-    let host: String = match env.get_string(&host_jstr) {
+    let host: String = match _env.get_string(&host_jstr) {
         Ok(s) => s.into(),
         Err(_) => {
             error!("Failed to get host string from Java");
             return;
         },
     };
-    let key: String = match env.get_string(&key_jstr) {
+    let key: String = match _env.get_string(&key_jstr) {
         Ok(s) => s.into(),
         Err(_) => {
             error!("Failed to get key string from Java");
             return;
         },
     };
-    let tcp_settings: String = match env.get_string(&tcp_settings_jstr) {
+    let tcp_settings: String = match _env.get_string(&tcp_settings_jstr) {
         Ok(s) => s.into(),
         Err(_) => {
             error!("Failed to get tcp settings string from Java");
             return;
         },
     };
-    let udp_settings: String = match env.get_string(&udp_settings_jstr) {
+    let udp_settings: String = match _env.get_string(&udp_settings_jstr) {
         Ok(s) => s.into(),
         Err(_) => {
             error!("Failed to get udp settings string from Java");
@@ -118,12 +135,16 @@ pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_star
         warn!("Server is already running");
         return;
     }
+    // Clear previous error when starting a new session
+    {
+        let mut err_lock = state.last_error.lock().unwrap();
+        *err_lock = None;
+    }
     let verbose = (verbose_jboolean as u8) > 0;
     let settings = create_settings(&host, port, &key, &tcp_settings, &udp_settings, verbose);
     if settings.verbose {
         info!("Spawning background thread for server");
     }
-
     std::thread::spawn(move || {
         run_tokio_server(settings);
     });
@@ -150,6 +171,31 @@ pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getS
     }
 }
 
+// New method to get and clear the last error
+#[unsafe(no_mangle)]
+pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getLastError(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let error_msg = get_and_clear_last_error();
+    match _env.new_string(&error_msg) {
+        Ok(output) => output.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getVersion(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let info = "Bizarredis client 0.1.9".to_string();
+    match _env.new_string(&info) {
+        Ok(output) => output.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +212,26 @@ mod tests {
         let state = get_state();
         let lock = state.is_running.lock().unwrap();
         assert_eq!(*lock, false);
+    }
+    
+    #[tokio::test]
+    async fn test_error_handling() {
+        // Reset state for test
+        APP_STATE.get_or_init(|| AppState {
+            is_running: Mutex::new(false),
+            last_error: Mutex::new(None),
+        });
+        let state = get_state();
+        {
+            let mut err_lock = state.last_error.lock().unwrap();
+            *err_lock = Some("Test Error".to_string());
+        }
+        // Retrieve and clear
+        let msg = get_and_clear_last_error();
+        assert_eq!(msg, "Test Error");
+        {
+            let err_lock = state.last_error.lock().unwrap();
+            assert!(err_lock.is_none());
+        }
     }
 }

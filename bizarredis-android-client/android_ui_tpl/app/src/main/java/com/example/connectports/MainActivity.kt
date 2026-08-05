@@ -40,6 +40,8 @@ class MainActivity : AppCompatActivity() {
         )
         external fun stopServer()
         external fun getStat(): String
+        external fun getLastError(): String
+        external fun getVersion(): String
     }
 
     private lateinit var settingsContainer: LinearLayout
@@ -52,6 +54,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var authKeyInput: EditText
     private lateinit var verboseLogsCheckbox: CheckBox
     private lateinit var prefs: SharedPreferences
+    private lateinit var versionTextView: TextView
+    private var lastExceptionMessage: String? = null
     // Track connection state
     private var isConnected = false
 
@@ -67,6 +71,13 @@ class MainActivity : AppCompatActivity() {
             )
             setPadding(16, 120, 16, 26)
         }
+        versionTextView = TextView(this).apply {
+            text = "Loading version..."
+            textSize = 12f
+            setTypeface(null, android.graphics.Typeface.NORMAL)
+            setTextColor(android.graphics.Color.parseColor("#808080"))
+        }
+        rootLayout.addView(versionTextView)
         // --- Global Settings Section (Host, Port, Key) ---
         val globalSettingsLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -198,6 +209,7 @@ class MainActivity : AppCompatActivity() {
                 ).apply { marginStart = 8 }
 
                 setOnClickListener {
+                    disconnect()
                     finish() // Closes the activity/app
                 }
             }
@@ -223,6 +235,14 @@ class MainActivity : AppCompatActivity() {
         if (settingsContainer.childCount == 0) {
             addNewConnectionRow()
         }
+        serverPortInput.post {
+            serverPortInput.requestFocus()
+        }
+        try {
+            versionTextView.text = "Version: ${getVersion()}"
+        } catch (e: Exception) {
+            versionTextView.text = "Version info unavailable"
+        }
     }
     // --- New Function for Statistics Dialog ---
     private fun showStatisticsDialog() {
@@ -231,10 +251,24 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             "Error getting statistics: ${e.message}"
         }
-
+        val lastJniError = try {
+            val err = getLastError()
+            if (err.isNotBlank()) err else null
+        } catch (e: Exception) {
+            null
+        }
+        val finalMessage = buildString {
+            if (lastJniError != null) {
+                append("Latest processing exception: $lastJniError\n\n")
+            }
+            if (lastExceptionMessage != null) {
+                append("Latest exception: $lastExceptionMessage\n\n")
+            }
+            append(statsText)
+        }
         AlertDialog.Builder(this)
             .setTitle("Statistics:")
-            .setMessage(statsText) 
+            .setMessage(finalMessage) 
             .setPositiveButton("OK") { dialog, _ -> dialog.dismiss() }
             .show()
     }
@@ -269,7 +303,7 @@ class MainActivity : AppCompatActivity() {
         try {
             Log.d(TAG, "Starting server...")
             startServer(host, port, authKey, configs.tcp, configs.udp, verbose)
-
+            lastExceptionMessage = null
             runOnUiThread {
                 isConnected = true
                 updateUIState(true)
@@ -278,6 +312,7 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start server in background", e)
+            lastExceptionMessage = e.message
             runOnUiThread {
                 isConnected = false
                 updateUIState(false)
@@ -291,13 +326,12 @@ class MainActivity : AppCompatActivity() {
         try {
             stopServer()
             Log.d(TAG, "Server stopped")
-            isConnected = false
-            updateUIState(false)
         } catch (e: Exception) {
+            lastExceptionMessage = e.message
             Log.e(TAG, "Failed to stop server", e)
-            isConnected = false
-            updateUIState(false)
         }
+        isConnected = false
+        updateUIState(false)
     }
 
     private fun updateUIState(isConnected: Boolean) {
