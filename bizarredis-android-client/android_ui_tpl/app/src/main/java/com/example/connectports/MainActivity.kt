@@ -1,7 +1,12 @@
 package com.example.connectports
 
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.os.IBinder
 import android.text.InputFilter
 import android.util.Log
 import android.view.View
@@ -22,6 +27,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_SERVER_PORT = "server_port"
         private const val KEY_AUTH_KEY = "auth_key"
         private const val KEY_VERBOSE_LOGS = "verbose_logs"
+
         init {
             try {
                 System.loadLibrary("socket_phone")
@@ -30,14 +36,16 @@ class MainActivity : AppCompatActivity() {
                 Log.e(TAG, "Failed to load library: ${e.message}", e)
             }
         }
+
         external fun startServer(
-            host: String, 
-            port: Int, 
-            authKey: String, 
-            tcpSettings: String, 
-            udpSettings: String, 
+            host: String,
+            port: Int,
+            authKey: String,
+            tcpSettings: String,
+            udpSettings: String,
             verbose: Boolean
         )
+
         external fun stopServer()
         external fun getStat(): String
         external fun getLastError(): String
@@ -47,17 +55,26 @@ class MainActivity : AppCompatActivity() {
     private lateinit var settingsContainer: LinearLayout
     private lateinit var btnAddRow: Button
     private lateinit var btnConnect: Button
-    private lateinit var btnStats: Button 
-    // Global settings fields
+    private lateinit var btnStats: Button
     private lateinit var serverHostInput: EditText
     private lateinit var serverPortInput: EditText
     private lateinit var authKeyInput: EditText
     private lateinit var verboseLogsCheckbox: CheckBox
     private lateinit var prefs: SharedPreferences
     private lateinit var versionTextView: TextView
+    private val uiVersion = "UI v1.3"
     private var lastExceptionMessage: String? = null
-    // Track connection state
     private var isConnected = false
+    private var rustService: RustNetworkService? = null
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as RustNetworkService.LocalBinder
+            rustService = binder.getService()
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            rustService = null
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,6 +88,7 @@ class MainActivity : AppCompatActivity() {
             )
             setPadding(16, 120, 16, 26)
         }
+
         versionTextView = TextView(this).apply {
             text = "Loading version..."
             textSize = 12f
@@ -78,7 +96,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(android.graphics.Color.parseColor("#808080"))
         }
         rootLayout.addView(versionTextView)
-        // --- Global Settings Section (Host, Port, Key) ---
+
         val globalSettingsLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
@@ -87,6 +105,7 @@ class MainActivity : AppCompatActivity() {
             )
             setPadding(0, 0, 0, 16)
         }
+
         val clientSettingsLabel = TextView(this).apply {
             text = "Client Settings:"
             textSize = 18f
@@ -94,7 +113,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 8)
         }
         globalSettingsLayout.addView(clientSettingsLabel)
-        // Row for Host and Port
+
         val serverRowLayout = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
@@ -102,6 +121,7 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
             val childParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT).apply { weight = 1f }
+
             serverHostInput = EditText(this@MainActivity).apply {
                 hint = "Server Host"
                 layoutParams = childParams
@@ -116,6 +136,7 @@ class MainActivity : AppCompatActivity() {
                     setSelection(length())
                 }
             }
+
             serverPortInput = EditText(this@MainActivity).apply {
                 hint = "Server Port"
                 layoutParams = childParams
@@ -125,7 +146,7 @@ class MainActivity : AppCompatActivity() {
             addView(serverHostInput)
             addView(serverPortInput)
         }
-        // Field for Auth Key (Password style)
+
         authKeyInput = EditText(this).apply {
             hint = "Auth Key"
             layoutParams = LinearLayout.LayoutParams(
@@ -135,7 +156,7 @@ class MainActivity : AppCompatActivity() {
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
             setPadding(8, 8, 8, 8)
         }
-        // Verbose Logs Checkbox
+
         verboseLogsCheckbox = CheckBox(this).apply {
             text = "Verbose logs"
             layoutParams = LinearLayout.LayoutParams(
@@ -143,17 +164,19 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = 8 }
         }
+
         globalSettingsLayout.addView(serverRowLayout)
         globalSettingsLayout.addView(authKeyInput)
         globalSettingsLayout.addView(verboseLogsCheckbox)
         rootLayout.addView(globalSettingsLayout)
-        // --- Existing Connections Section ---
+
         val infoText = TextView(this).apply {
             text = "Configure Connections"
             textSize = 20f
             setPadding(0, 0, 0, 16)
         }
         rootLayout.addView(infoText)
+
         settingsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
@@ -162,22 +185,22 @@ class MainActivity : AppCompatActivity() {
             ).apply { weight = 1f }
         }
         rootLayout.addView(settingsContainer)
-        // --- Action Buttons Container (Connect + Stats side-by-side, Quit on right) ---
+
         val actionButtonsLayout = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = 16 }
-            // Layout for Connect and Stats buttons to share space evenly on the left/center
+
             val mainButtonsContainer = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    weight = 1f // Takes up remaining space except for Quit button
+                    weight = 1f
                 }
                 val buttonParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                     weight = 1f
-                    marginEnd = 8 
+                    marginEnd = 8
                 }
                 btnConnect = Button(this@MainActivity).apply {
                     text = "Connect"
@@ -200,7 +223,6 @@ class MainActivity : AppCompatActivity() {
                 addView(btnConnect)
                 addView(btnStats)
             }
-            // Quit Button aligned to the right
             val quitButton = Button(this@MainActivity).apply {
                 text = "Quit"
                 layoutParams = LinearLayout.LayoutParams(
@@ -210,7 +232,7 @@ class MainActivity : AppCompatActivity() {
 
                 setOnClickListener {
                     disconnect()
-                    finish() // Closes the activity/app
+                    finish()
                 }
             }
             addView(mainButtonsContainer)
@@ -225,7 +247,7 @@ class MainActivity : AppCompatActivity() {
             ).apply { topMargin = 16 }
             setOnClickListener {
                 addNewConnectionRow()
-                saveCurrentState() 
+                saveCurrentState()
             }
         }
         rootLayout.addView(btnAddRow)
@@ -239,12 +261,22 @@ class MainActivity : AppCompatActivity() {
             serverPortInput.requestFocus()
         }
         try {
-            versionTextView.text = "Version: ${getVersion()}"
+            versionTextView.text = "Version: ${getVersion()} ${uiVersion}"
         } catch (e: Exception) {
             versionTextView.text = "Version info unavailable"
         }
+        bindService(Intent(this, RustNetworkService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
     }
-    // --- New Function for Statistics Dialog ---
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            unbindService(serviceConnection)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error unbinding service", e)
+        }
+    }
+
     private fun showStatisticsDialog() {
         val statsText = try {
             getStat()
@@ -268,7 +300,7 @@ class MainActivity : AppCompatActivity() {
         }
         AlertDialog.Builder(this)
             .setTitle("Statistics:")
-            .setMessage(finalMessage) 
+            .setMessage(finalMessage)
             .setPositiveButton("OK") { dialog, _ -> dialog.dismiss() }
             .show()
     }
@@ -276,59 +308,64 @@ class MainActivity : AppCompatActivity() {
     private fun connect() {
         val host = serverHostInput.text.toString().trim()
         val portStr = serverPortInput.text.toString().trim()
-        
         if (host.isEmpty()) {
             Toast.makeText(this, "Server Host is required", Toast.LENGTH_SHORT).show()
             return
         }
-
         val port = try {
             portStr.toInt()
         } catch (e: NumberFormatException) {
             Toast.makeText(this, "Invalid Server Port", Toast.LENGTH_SHORT).show()
             return
         }
-
         if (port !in 1..65535) {
-             Toast.makeText(this, "Server Port out of range", Toast.LENGTH_SHORT).show()
-             return
+            Toast.makeText(this, "Server Port out of range", Toast.LENGTH_SHORT).show()
+            return
         }
 
-        updateUIState(true) 
+        updateUIState(true)
         btnConnect.isEnabled = false
         val configs = collectAndLogConfigurations()
         val verbose = verboseLogsCheckbox.isChecked
         val authKey = authKeyInput.text.toString()
-
         try {
-            Log.d(TAG, "Starting server...")
-            startServer(host, port, authKey, configs.tcp, configs.udp, verbose)
-            lastExceptionMessage = null
-            runOnUiThread {
-                isConnected = true
-                updateUIState(true)
-                btnConnect.isEnabled = true
-                Toast.makeText(this@MainActivity, "Server Started", Toast.LENGTH_SHORT).show()
+            Log.d(TAG, "Starting server via Service...")
+            val intent = Intent(this, RustNetworkService::class.java).apply {
+                putExtra("host", host)
+                putExtra("port", port)
+                putExtra("auth_key", authKey)
+                putExtra("tcp_settings", configs.tcp)
+                putExtra("udp_settings", configs.udp)
+                putExtra("verbose", verbose)
             }
+
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+
+            isConnected = true
+            updateUIState(true)
+            btnConnect.isEnabled = true
+            Toast.makeText(this@MainActivity, "Server Started", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start server in background", e)
+            Log.e(TAG, "Failed to start server service", e)
             lastExceptionMessage = e.message
-            runOnUiThread {
-                isConnected = false
-                updateUIState(false)
-                btnConnect.isEnabled = true
-                Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
-            }
+            isConnected = false
+            updateUIState(false)
+            btnConnect.isEnabled = true
+            Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
     private fun disconnect() {
         try {
-            stopServer()
-            Log.d(TAG, "Server stopped")
+            rustService?.stopRustRuntime()
+            Log.d(TAG, "Server stopped via Service")
         } catch (e: Exception) {
             lastExceptionMessage = e.message
-            Log.e(TAG, "Failed to stop server", e)
+            Log.e(TAG, "Failed to stop server service", e)
         }
         isConnected = false
         updateUIState(false)
@@ -385,7 +422,7 @@ class MainActivity : AppCompatActivity() {
                     android.R.layout.simple_spinner_item,
                     listOf("TCP", "UDP")
                 ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-                setSelection(typeIndex) 
+                setSelection(typeIndex)
             }
             // 3. IP
             val ipInput = EditText(this@MainActivity).apply {
@@ -409,7 +446,7 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { marginStart = 8 }   
+                ).apply { marginStart = 8 }
                 setOnClickListener { view ->
                     if (view.parent is ViewGroup) {
                         settingsContainer.removeView(view.parent as View)
@@ -423,7 +460,6 @@ class MainActivity : AppCompatActivity() {
             addView(portInput)
             addView(deleteButton)
         }
-
         settingsContainer.addView(rowLayout)
     }
 
@@ -437,7 +473,7 @@ class MainActivity : AppCompatActivity() {
             val ipInput = row.getChildAt(2) as? EditText
             val portInput = row.getChildAt(3) as? EditText
             val name = nameInput?.text.toString().trim()
-            val typeIndex = typeSpinner?.selectedItemPosition ?: 0 
+            val typeIndex = typeSpinner?.selectedItemPosition ?: 0
             val ip = ipInput?.text.toString().trim()
             val port = portInput?.text.toString().trim()
             val jsonObject = JSONObject().apply {
