@@ -1,0 +1,25 @@
+services:
+  someqtt-local:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      RUST_LOG: "warn"
+      LOADING_LEVEL: "high"
+      WORKERS: "4"
+      TCP_SOCKETS: "web-api:0.0.0.0:7228;iperf-tcp:0.0.0.0:8093"
+      UDP_SOCKETS: "dns:0.0.0.0:5533;iperf-udp:0.0.0.0:8094"
+      CRYPTO_KEY: "<SETUP>"
+      SERVER_HOST: "<EDIT: your server>"
+
+    ports:
+      - "7228:7228/tcp"  # curl -x http://127.0.0.1:7228 https://docs.rs/
+      - "9093:8093/tcp"  # iperf -p 9093 -c 127.0.0.1 
+      - "9094:8094/udp"  # iperf -u -p 9094 -c 127.0.0.1 
+      - "5533:5533/udp"  # nslookup -port=5533 google.com 127.0.0.1
+    healthcheck:
+      test: ["CMD-SHELL", "pidof someqtt || pidof iperf | xargs kill"]
+      interval: 15s
+      timeout: 1s
+      retries: 1
+    restart: always

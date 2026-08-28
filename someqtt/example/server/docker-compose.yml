@@ -1,0 +1,38 @@
+services:
+  someqtt-gate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      RUST_LOG: "warn"
+      SERVER: "1"
+      WORKERS: "4"
+      LOADING_LEVEL: "high"
+      CRYPTO_KEY: "<SETUP>"
+      SERVER_TCP_TARGET: "web-api:10.1.10.15:3128;iperf-tcp:10.1.10.20:9093"
+      SERVER_UDP_TARGET: "dns:8.8.8.8:53;iperf-udp:10.1.10.20:9094"
+    networks:
+      private_net:
+        ipv4_address: 10.1.10.20
+    healthcheck:
+      test: ["CMD-SHELL", "pidof someqtt || pidof iperf | xargs kill"]
+      interval: 15s
+      timeout: 1s
+      retries: 1
+    restart: always
+    ports:
+      - "1883:1883/tcp"
+
+  squid-api:
+    image: ubuntu/squid
+    restart: unless-stopped
+    networks:
+      private_net:
+        ipv4_address: 10.1.10.15
+
+networks:
+  private_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.1.10.0/24
