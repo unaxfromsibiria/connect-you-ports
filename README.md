@@ -7,3 +7,5 @@ This project consists of two subprojects with the same purpose:
 - The second, more stable implementation with built-in connection handling is called `bizarredis`. Try using this one.
 
 - Server of bizarredis for Android.
+
+- SoMeQTT - another implementation of the same kind with improved performance and reduced losses (`cd someqtt`)

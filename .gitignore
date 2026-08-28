@@ -4,3 +4,8 @@
 /target
 .vscode
 */.vscode
+example*.txt
+docker-compose.*
+AGENTS.md
+/*/example*.txt
+/*/AGENTS.md
