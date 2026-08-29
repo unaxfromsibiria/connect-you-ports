@@ -121,6 +121,8 @@ async fn process_data_transfer_tcp(
     let (mut reader, mut writer) = tokio::io::split(tcp_stream);
     let mut read_buffer = vec![0u8; cfg.buffer_size];
     let stat_key = format!("out-total-{}", cfg.service_name);
+    let conn_key = format!("out-conn-{}", cfg.service_name);
+    add_connection(&conn_key).await;
     let mut with_quit = String::new();
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
 
@@ -210,6 +212,7 @@ async fn process_data_transfer_tcp(
     if in_bytes + out_bytes + error_count > 0 {
         update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
     }
+    lost_connection(&conn_key).await;
 }
 
 async fn process_data_transfer_udp(
@@ -235,6 +238,9 @@ async fn process_data_transfer_udp(
             return;
         }
     };
+
+    let conn_key = format!("out-conn-{}", cfg.service_name);
+    add_connection(&conn_key).await;
 
     let mut read_buffer = vec![0u8; cfg.buffer_size];
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
@@ -295,6 +301,7 @@ async fn process_data_transfer_udp(
     if in_bytes + out_bytes + error_count > 0 {
         update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
     }
+    lost_connection(&conn_key).await;
 }
 
 async fn handle_connection(
@@ -312,6 +319,7 @@ async fn handle_connection(
 
     let mut stat_key = format!("unknown-{}", ip_str);
     let idle_limit = settings.idle_tcp_limit;
+    let stat_save_iter = settings.stat_save_iter;
 
     add_connection(&ip_str).await;
     info!("Server connection from {} ({})", peer_addr, ip_str);
@@ -342,7 +350,6 @@ async fn handle_connection(
                             Ok((msg, transfer_id)) => {
                                 match resolve_target(&msg.service, settings) {
                                     Some(cfg) => {
-                                        stat_key = format!("{}-{}", ip_str, cfg.service_name);
                                         if !(exists(&transfer_id).await) {
                                             info!(
                                                 "New transfering from {} service={}({}) target={}:{} proto={} transfer={}",
@@ -354,6 +361,7 @@ async fn handle_connection(
                                                 if cfg.is_udp {"udp"} else {"tcp"},
                                                 part_uuid(&transfer_id)
                                             );
+                                            stat_key = format!("{}-{}", ip_str, cfg.service_name);
                                             add_connection(&ip_str).await;
                                             let client_in_channel = add_route(&transfer_id).await;
                                             let client_out_channel = serv_tx.clone();
@@ -365,9 +373,7 @@ async fn handle_connection(
                                                 }
                                             });
                                         }
-                                        if send_data(&transfer_id, &msg.data).await {
-                                            out_bytes += msg.data.len();
-                                        } else {
+                                        if !(send_data(&transfer_id, &msg.data).await) {
                                             error_count += 1;
                                             // Failed delivery: remove the transfer from routing so no further logic runs for it.
                                             if exists(&transfer_id).await {
@@ -422,6 +428,7 @@ async fn handle_connection(
                     } else {
                         data_handler.make_data_message(out_data.as_ref(), &service, &out_transfer)
                     };
+                    out_bytes += packet.len();
                     match framed.send(packet).await {
                         Ok(_) => {
                             debug!(
@@ -445,6 +452,13 @@ async fn handle_connection(
             _ = tokio::time::sleep(idle_limit) => {
                 warn!("Idle timeout for connection from {} ({})", peer_addr, stat_key);
                 break;
+            },
+            // Periodic traffic statistics update (mirrors client processing loops).
+            _ = sleep(stat_save_iter) => {
+                if in_bytes + out_bytes + error_count > 0 {
+                    update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
+                    (in_bytes, out_bytes, error_count) = (0, 0, 0);
+                }
             }
         }
     }

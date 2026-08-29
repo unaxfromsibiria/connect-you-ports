@@ -400,81 +400,95 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
             let server_channels = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
             let conn_settings = settings_local.clone();
             let (_, service_out_channel_size) = settings_local.channel_size();
+            let mut out_bytes: usize = 0;
             loop {
                 if !is_running() {
                     break;
                 }
-                match socket_arc.recv_from(&mut buf).await {
-                    Ok((n, peer)) => {
-                        if n < 1 {
-                            debug!("Empty packet from UDP peer {}", peer);
-                            continue;
-                        }
-                        let transfer = code_name(&format!("{}-{}-{}", serv_code, client_name, peer));
-                        let data = data_handler.make_data_message(&buf[..n], &serv_code, &transfer);
-                        if !exists(&transfer).await {
-                            add_connection(&stat_key).await;
-                            info!("New UDP peer {} in {}", part_uuid(&transfer), service_display);
-                            let from_client_channel = add_route(&transfer).await;
-                            let s_name = service_name.clone();
-                            let socket = Arc::clone(&socket_arc);
-                            let stat_key_peer = stat_key.clone();
-                            let server_addr = addr.clone();
-                            let conn_info = peer.ip().to_string();
-                            let service_display_peer = service_display.clone();
-                            let (serv_tx, serv_rx) = mpsc::channel(service_out_channel_size);
-                            server_channels.write().await.insert(transfer, serv_tx);
-                            let conn_settings_spawn = conn_settings.clone();
-                            let data_handler_spawn = data_handler.clone();
-                            tokio::spawn(async move {
-                                server_connection(
-                                    conn_settings_spawn,
-                                    s_name,
-                                    conn_info,
-                                    server_addr,
-                                    data_handler_spawn,
-                                    serv_rx,
-                                ).await;
-                            });
+                tokio::select! {
+                    recv_result = socket_arc.recv_from(&mut buf) => match recv_result {
+                        Ok((n, peer)) => {
+                            out_bytes += n;
+                            if n < 1 {
+                                debug!("Empty packet from UDP peer {}", peer);
+                            } else {
+                                let transfer = code_name(&format!("{}-{}-{}", serv_code, client_name, peer));
+                                let data = data_handler.make_data_message(&buf[..n], &serv_code, &transfer);
+                                if !exists(&transfer).await {
+                                    add_connection(&stat_key).await;
+                                    info!("New UDP peer {} in {}", part_uuid(&transfer), service_display);
+                                    let from_client_channel = add_route(&transfer).await;
+                                    let s_name = service_name.clone();
+                                    let socket = Arc::clone(&socket_arc);
+                                    let stat_key_peer = stat_key.clone();
+                                    let server_addr = addr.clone();
+                                    let conn_info = peer.ip().to_string();
+                                    let service_display_peer = service_display.clone();
+                                    let (serv_tx, serv_rx) = mpsc::channel(service_out_channel_size);
+                                    server_channels.write().await.insert(transfer, serv_tx);
+                                    let conn_settings_spawn = conn_settings.clone();
+                                    let data_handler_spawn = data_handler.clone();
+                                    tokio::spawn(async move {
+                                        server_connection(
+                                            conn_settings_spawn,
+                                            s_name,
+                                            conn_info,
+                                            server_addr,
+                                            data_handler_spawn,
+                                            serv_rx,
+                                        ).await;
+                                    });
 
-                            let channels_clone = Arc::clone(&server_channels);
-                            tokio::spawn(async move {
-                                udp_peer_processing(
-                                    peer,
-                                    transfer,
-                                    serv_code,
-                                    service_display_peer,
-                                    stat_key_peer,
-                                    from_client_channel,
-                                    socket,
-                                    channels_clone,
-                                    min_delay,
-                                    idle_limit,
-                                    stat_save_iter,
-                                    wait_before_close_time,
-                                ).await;
-                            });
-                        }
-                        {
-                            // Read lock + cloned sender: the map is read on every packet, and sending needs no mutation.
-                            let tx_opt = server_channels.read().await.get(&transfer).cloned();
-                            match tx_opt {
-                                Some(tx) => {
-                                    if let Err(err) = tx.send(data).await {
-                                        warn!("Failed to send data to server channel {} in {}: {}", part_uuid(&transfer), service_display, err);
-                                        server_channels.write().await.remove(&transfer);
+                                    let channels_clone = Arc::clone(&server_channels);
+                                    tokio::spawn(async move {
+                                        udp_peer_processing(
+                                            peer,
+                                            transfer,
+                                            serv_code,
+                                            service_display_peer,
+                                            stat_key_peer,
+                                            from_client_channel,
+                                            socket,
+                                            channels_clone,
+                                            min_delay,
+                                            idle_limit,
+                                            stat_save_iter,
+                                            wait_before_close_time,
+                                        ).await;
+                                    });
+                                }
+                                {
+                                    // Read lock + cloned sender: the map is read on every packet, and sending needs no mutation.
+                                    let tx_opt = server_channels.read().await.get(&transfer).cloned();
+                                    match tx_opt {
+                                        Some(tx) => {
+                                            if let Err(err) = tx.send(data).await {
+                                                warn!("Failed to send data to server channel {} in {}: {}", part_uuid(&transfer), service_display, err);
+                                                server_channels.write().await.remove(&transfer);
+                                            }
+                                        },
+                                        None => error!("No route for transfer {} in {}", part_uuid(&transfer), service_display),
                                     }
-                                },
-                                None => error!("No route for transfer {} in {}", part_uuid(&transfer), service_display),
+                                }
                             }
+                        },
+                        Err(err) => {
+                            error!("UDP receive error for service {}: {}", service_name, err);
+                            lost_connection(&stat_key).await;
+                            sleep(min_delay).await;
+                        },
+                    },
+                    // Periodic out-traffic statistics update
+                    _ = sleep(stat_save_iter) => {
+                        if out_bytes > 0 {
+                            update_traffic_stats(&stat_key, 0, out_bytes, 0).await;
+                            out_bytes = 0;
                         }
-                    },
-                    Err(err) => {
-                        error!("UDP receive error for service {}: {}", service_name, err);
-                        lost_connection(&stat_key).await;
-                        sleep(min_delay).await;
-                    },
+                    }
                 }
+            }
+            if out_bytes > 0 {
+                update_traffic_stats(&stat_key, 0, out_bytes, 0).await;
             }
             TaskResultEnum::WorkerDone
         });
@@ -497,7 +511,7 @@ async fn udp_peer_processing(
 ) {
     let t_inf = part_uuid(&transfer);
     let s_part = part_uuid(&service_code);
-    let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
+    let (mut in_bytes, mut error_count) = (0, 0);
     loop {
         tokio::select! {
             // Send data from server connection to peer
@@ -527,15 +541,15 @@ async fn udp_peer_processing(
             },
             // Periodic traffic statistics update
             _ = sleep(stat_save_iter) => {
-                if in_bytes + out_bytes + error_count > 0 {
-                    update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
-                    (in_bytes, out_bytes, error_count) = (0, 0, 0);
+                if in_bytes + error_count > 0 {
+                    update_traffic_stats(&stat_key, in_bytes, 0, error_count).await;
+                    (in_bytes, error_count) = (0, 0);
                 }
             }
         }
     }
-    if in_bytes + out_bytes + error_count > 0 {
-        update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
+    if in_bytes + error_count > 0 {
+        update_traffic_stats(&stat_key, in_bytes, 0, error_count).await;
     }
     lost_connection(&stat_key).await;
     info!("Stopping UDP handler for {} in {} ({})", t_inf, service_name, s_part);
