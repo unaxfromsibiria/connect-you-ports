@@ -88,15 +88,15 @@ async fn server_connection<T: LoadingParams + Send + 'static>(
                                          }
                                     }
                                 },
-                                  Some(Err(err)) => {
-                                      error!("Read error {} in connection: {}", err, connection_info);
-                                      break;
-                                  },
-                                  None => {
-                                      info!("Connection closed for {} in connection: {}", addr, connection_info);
-                                      done = true;
-                                      break;
-                                  },
+                                Some(Err(err)) => {
+                                    error!("Read error {} in connection: {}", err, connection_info);
+                                    break;
+                                },
+                                None => {
+                                    info!("Connection closed for {} in connection: {}", addr, connection_info);
+                                    done = true;
+                                    break;
+                                },
                             }
                         },
                         Some(data) = to_server_channel.recv() => {

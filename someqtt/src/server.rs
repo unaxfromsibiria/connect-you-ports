@@ -330,6 +330,10 @@ async fn handle_connection(
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
     // Transfer ids observed on this connection (used for post-loop quit notification).
     let mut seen_transfers: HashSet<Uuid> = HashSet::new();
+    // Current transfer (id, service) of this connection; a client uses one connection per transfer.
+    let mut current_transfer: Option<(Uuid, Uuid)> = None;
+    // Set when the loop breaks on idle timeout (drives the post-loop close-out).
+    let mut broke_on_idle = false;
     // True after the first outbound framed.send() failure: further socket sends are skipped.
     let mut send_dead = false;
     // Number of valid MQTT frames with undecryptable content or unknown service for this peer.
@@ -352,7 +356,7 @@ async fn handle_connection(
                                     Some(cfg) => {
                                         if !(exists(&transfer_id).await) {
                                             info!(
-                                                "New transfering from {} service={}({}) target={}:{} proto={} transfer={}",
+                                                "New transfer from {} service={}({}) target={}:{} proto={} transfer={}",
                                                 peer_addr,
                                                 cfg.service_name,
                                                 part_uuid(&cfg.service_code),
@@ -364,6 +368,7 @@ async fn handle_connection(
                                             stat_key = format!("{}-{}", ip_str, cfg.service_name);
                                             add_connection(&ip_str).await;
                                             let client_in_channel = add_route(&transfer_id).await;
+                                            current_transfer = Some((transfer_id, msg.service));
                                             let client_out_channel = serv_tx.clone();
                                             tokio::spawn(async move {
                                                 if cfg.is_udp {
@@ -373,6 +378,7 @@ async fn handle_connection(
                                                 }
                                             });
                                         }
+                                        let to_close = msg.data.is_empty();
                                         if !(send_data(&transfer_id, &msg.data).await) {
                                             error_count += 1;
                                             // Failed delivery: remove the transfer from routing so no further logic runs for it.
@@ -380,6 +386,10 @@ async fn handle_connection(
                                                 warn!("Failed send_data, removing route {}", part_uuid(&transfer_id));
                                                 remove_route(&transfer_id).await;
                                             }
+                                        }
+                                        if to_close {
+                                            info!("Closing by client request {}", part_uuid(&transfer_id));
+                                            break;
                                         }
                                     },
                                     None => {
@@ -451,6 +461,7 @@ async fn handle_connection(
             },
             _ = tokio::time::sleep(idle_limit) => {
                 warn!("Idle timeout for connection from {} ({})", peer_addr, stat_key);
+                broke_on_idle = true;
                 break;
             },
             // Periodic traffic statistics update (mirrors client processing loops).
@@ -489,6 +500,31 @@ async fn handle_connection(
                 send_data(&t, &empty).await;
             }).await;
         }
+    }
+
+    // Idle timeout close-out: notify the client (quit message) and the target channel
+    // (empty bytes mark end of exchange, closing a TCP target).
+    if let Some((transfer, service)) = broke_on_idle.then(|| current_transfer).flatten() {
+        warn!("Idle close-out for {} transfer={}", peer_addr, part_uuid(&transfer));
+        if !send_dead {
+            let packet = data_handler.make_quit_message(&service, &transfer);
+            out_bytes += packet.len();
+            match framed.send(packet).await {
+                Ok(_) => {},
+                Err(err) => {
+                    error_count += 1;
+                    warn!("Idle close-out: quit send failed for {} (transfer={}): {}", peer_addr, part_uuid(&transfer), err);
+                }
+            }
+        }
+        let deadline = tokio::time::Instant::now() + settings.drain_total();
+        // Bounded by drain_total(): a non-draining target receiver cannot block the close-out.
+        let _ = tokio::time::timeout(deadline.saturating_duration_since(tokio::time::Instant::now()), async move {
+            send_data(&transfer, &Bytes::new()).await;
+        }).await;
+        let collect_timeout = settings.collect_message_timeout(true);
+        sleep(collect_timeout).await;
+        remove_route(&transfer).await;
     }
 
     if in_bytes + out_bytes + error_count > 0 {
