@@ -337,7 +337,8 @@ async fn tcp_connection_processing(
         tokio::select! {
             _ = sleep(wait_before_close_time) => {
                 if with_quit {
-                    if let Err(err) = to_server_channel.send(Bytes::new()).await {
+                    let data = data_handler.make_quit_message(&service_code, &transfer);
+                    if let Err(err) = to_server_channel.send(data).await {
                         warn!("Failed to send quit signal to server channel {} in {}: {}", t_inf, service_name, err);
                     }
                 }
