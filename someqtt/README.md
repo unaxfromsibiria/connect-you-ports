@@ -34,7 +34,7 @@ Values may be given as a separate argument (`--workers 8`) or inline (`--workers
 | `SERVER_PORT` | server port (default: 1883) |
 | `SERVER_TCP_TARGET` | TCP targets map 'name:ip:port;...' on the server side |
 | `SERVER_UDP_TARGET` | UDP targets map 'name:ip:port;...' on the server side |
-| `STAT_FILE` | statistics file path (default: /tmp/stat.txt); set to `memory` to keep stats in process memory instead of writing a file |
+| `STAT_FILE` | statistics file path (default: /tmp/stat.txt); use `memory` to keep stats in process memory instead of a file |
 | `STAT_SAVE_INTERVAL` | stats save interval in seconds (server default: 2, client default: 1) |
 | `STAT_SHOW_INTERVAL` | stats display interval in seconds (default: 180) |
 | `TCP_SOCKETS` | local TCP sockets map 'name:ip:port;...' forwarded through the tunnel (client side) |
@@ -42,6 +42,21 @@ Values may be given as a separate argument (`--workers 8`) or inline (`--workers
 | `UDP_CONNECTION_IDLE_LIMIT` | UDP idle timeout in seconds (default: 120) |
 | `UDP_SOCKETS` | local UDP sockets map 'name:ip:port;...' forwarded through the tunnel (client side) |
 | `WORKERS` | tokio worker threads; 0 or unset means auto-detect CPU cores |
+
+## Creating examples with make
+
+To create ready-to-run `docker-compose.yml` files, use:
+
+```bash
+make example_server   # generates docker-compose.yml for the server side
+make example_client   # generates docker-compose.yml for the client side
+```
+
+Each target copies the corresponding template from `example/`, fills in a random `CRYPTO_KEY`, and prints the key plus the lines you need to edit (e.g. your server address, targets). Set the printed key as `CRYPTO_KEY` on the opposite side, then run:
+
+```bash
+docker compose up -d --build
+```
 
 ## LLM-assisted development
 

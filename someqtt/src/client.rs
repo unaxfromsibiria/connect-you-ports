@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tokio::time::sleep;
+use tokio::time::{interval, sleep};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use uuid::Uuid;
 
@@ -271,6 +271,8 @@ async fn tcp_connection_processing(
     let mut buf = vec![0; buffer_size];
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
+    // Periodic stat flusher: misses bursts instead of being dropped by the busy loop.
+    let mut stat_tick = interval(stat_save_iter);
     // data handler
     loop {
         tokio::select! {
@@ -319,7 +321,7 @@ async fn tcp_connection_processing(
                 break;
             },
             // Periodic traffic statistics update
-            _ = sleep(stat_save_iter) => {
+            _ = stat_tick.tick() => {
                 if in_bytes + out_bytes + error_count > 0 {
                     update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
                     (in_bytes, out_bytes, error_count) = (0, 0, 0);
@@ -402,6 +404,10 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
             let conn_settings = settings_local.clone();
             let (_, service_out_channel_size) = settings_local.channel_size();
             let mut out_bytes: usize = 0;
+            // Per-peer outbound traffic, flushed under in-<service>-<peer ip>.
+            let mut peer_out: HashMap<String, usize> = HashMap::new();
+            // Periodic stat flusher: survives bursty packet flow without losing ticks.
+            let mut stat_tick = interval(stat_save_iter);
             loop {
                 if !is_running() {
                     break;
@@ -413,6 +419,9 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                             if n < 1 {
                                 debug!("Empty packet from UDP peer {}", peer);
                             } else {
+                                // Per-peer traffic key: in-<service>-<peer ip>.
+                                let stat_key_peer = format!("in-{}-{}", service_name, peer.ip());
+                                *peer_out.entry(stat_key_peer.clone()).or_insert(0) += n;
                                 let transfer = code_name(&format!("{}-{}-{}", serv_code, client_name, peer));
                                 let data = data_handler.make_data_message(&buf[..n], &serv_code, &transfer);
                                 if !exists(&transfer).await {
@@ -421,7 +430,6 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                                     let from_client_channel = add_route(&transfer).await;
                                     let s_name = service_name.clone();
                                     let socket = Arc::clone(&socket_arc);
-                                    let stat_key_peer = stat_key.clone();
                                     let server_addr = addr.clone();
                                     let conn_info = peer.ip().to_string();
                                     let service_display_peer = service_display.clone();
@@ -441,6 +449,7 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                                     });
 
                                     let channels_clone = Arc::clone(&server_channels);
+                                    let aggregate_stat_key = stat_key.clone();
                                     tokio::spawn(async move {
                                         udp_peer_processing(
                                             peer,
@@ -448,6 +457,7 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                                             serv_code,
                                             service_display_peer,
                                             stat_key_peer,
+                                            aggregate_stat_key,
                                             from_client_channel,
                                             socket,
                                             channels_clone,
@@ -458,18 +468,20 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                                         ).await;
                                     });
                                 }
-                                {
-                                    // Read lock + cloned sender: the map is read on every packet, and sending needs no mutation.
-                                    let tx_opt = server_channels.read().await.get(&transfer).cloned();
-                                    match tx_opt {
-                                        Some(tx) => {
-                                            if let Err(err) = tx.send(data).await {
-                                                warn!("Failed to send data to server channel {} in {}: {}", part_uuid(&transfer), service_display, err);
-                                                server_channels.write().await.remove(&transfer);
+                                // Read lock + cloned sender: the map is read on every packet, and sending needs no mutation.
+                                let tx_opt = server_channels.read().await.get(&transfer).cloned();
+                                match tx_opt {
+                                    Some(tx) => {
+                                        if let Err(err) = tx.send(data).await {
+                                             warn!("Failed to send data to server channel {} in {}: {}", part_uuid(&transfer), service_display, err);
+                                            let mut channels_guard = server_channels.write().await;
+                                            match channels_guard.remove(&transfer) {
+                                                Some(_) => info!("Removed server channel for transfer {} in {}", part_uuid(&transfer), service_display),
+                                                None => warn!("Server channel for transfer {} was already gone before remove in {}", part_uuid(&transfer), service_display),
                                             }
-                                        },
-                                        None => error!("No route for transfer {} in {}", part_uuid(&transfer), service_display),
-                                    }
+                                        }
+                                    },
+                                    None => error!("No route for transfer {} in {}", part_uuid(&transfer), service_display),
                                 }
                             }
                         },
@@ -479,10 +491,13 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                             sleep(min_delay).await;
                         },
                     },
-                    // Periodic out-traffic statistics update
-                    _ = sleep(stat_save_iter) => {
+                     // Periodic out-traffic statistics update (aggregate + per-peer keys)
+                    _ = stat_tick.tick() => {
                         if out_bytes > 0 {
                             update_traffic_stats(&stat_key, 0, out_bytes, 0).await;
+                            for (key, bytes) in peer_out.drain().filter(|(_, v)| *v > 0) {
+                                update_traffic_stats(&key, 0, bytes, 0).await;
+                            }
                             out_bytes = 0;
                         }
                     }
@@ -490,6 +505,9 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
             }
             if out_bytes > 0 {
                 update_traffic_stats(&stat_key, 0, out_bytes, 0).await;
+                for (key, bytes) in peer_out.drain().filter(|(_, v)| *v > 0) {
+                    update_traffic_stats(&key, 0, bytes, 0).await;
+                }
             }
             TaskResultEnum::WorkerDone
         });
@@ -502,6 +520,7 @@ async fn udp_peer_processing(
     service_code: Uuid,
     service_name: String,
     stat_key: String,
+    stat_key_all: String,
     mut from_client_channel: mpsc::Receiver<(Uuid, Bytes)>,
     socket: Arc<UdpSocket>,
     server_channels: Arc<tokio::sync::RwLock<HashMap<Uuid, mpsc::Sender<Bytes>>>>,
@@ -513,6 +532,8 @@ async fn udp_peer_processing(
     let t_inf = part_uuid(&transfer);
     let s_part = part_uuid(&service_code);
     let (mut in_bytes, mut error_count) = (0, 0);
+    // Interval-based flush: fires from the tokio timer wheel even when the recv branch stays hot.
+    let mut stat_tick = interval(stat_save_iter);
     loop {
         tokio::select! {
             // Send data from server connection to peer
@@ -520,6 +541,11 @@ async fn udp_peer_processing(
                 if data.is_empty() {
                     info!("Closing UDP peer {} by request", t_inf);
                     with_quit_cleanup(&stat_key, &mut from_client_channel, &socket, peer, min_delay, wait_before_close_time).await;
+                    let mut channels_guard = server_channels.write().await;
+                    match channels_guard.remove(&transfer) {
+                        Some(_) => info!("Removed server channel for transfer {} in {}", t_inf, service_name),
+                        None => warn!("Server channel for transfer {} was already gone before remove in {}", t_inf, service_name),
+                    }
                     remove_route(&transfer).await;
                     break;
                 }
@@ -536,14 +562,19 @@ async fn udp_peer_processing(
             _ = sleep(idle_limit) => {
                 warn!("Idle timeout for UDP peer {} ({})", peer, s_part);
                 lost_connection(&stat_key).await;
-                server_channels.write().await.remove(&transfer);
+                let mut channels_guard = server_channels.write().await;
+                match channels_guard.remove(&transfer) {
+                    Some(_) => info!("Removed server channel for transfer {} in {}", t_inf, service_name),
+                    None => warn!("Server channel for transfer {} was already gone before remove in {}", t_inf, service_name),
+                }
                 remove_route(&transfer).await;
                 break;
             },
             // Periodic traffic statistics update
-            _ = sleep(stat_save_iter) => {
+            _ = stat_tick.tick() => {
                 if in_bytes + error_count > 0 {
                     update_traffic_stats(&stat_key, in_bytes, 0, error_count).await;
+                    update_traffic_stats(&stat_key_all, in_bytes, 0, error_count).await;
                     (in_bytes, error_count) = (0, 0);
                 }
             }
@@ -551,6 +582,7 @@ async fn udp_peer_processing(
     }
     if in_bytes + error_count > 0 {
         update_traffic_stats(&stat_key, in_bytes, 0, error_count).await;
+        update_traffic_stats(&stat_key_all, in_bytes, 0, error_count).await;
     }
     lost_connection(&stat_key).await;
     info!("Stopping UDP handler for {} in {} ({})", t_inf, service_name, s_part);

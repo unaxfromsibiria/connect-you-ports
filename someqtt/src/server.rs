@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tokio::time::sleep;
+use tokio::time::{interval, sleep};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use uuid::Uuid;
 
@@ -321,6 +321,8 @@ async fn handle_connection(
     let idle_limit = settings.idle_tcp_limit;
     let stat_save_iter = settings.stat_save_iter;
 
+    // Periodic stat flusher: interval ticks are scheduled on the tokio timer wheel, so they fire even when I/O stays hot.
+    let mut stat_tick = interval(stat_save_iter);
     add_connection(&ip_str).await;
     info!("Server connection from {} ({})", peer_addr, ip_str);
     let (server_channel_size, service_out_channel_size) = settings.channel_size();
@@ -464,8 +466,8 @@ async fn handle_connection(
                 broke_on_idle = true;
                 break;
             },
-            // Periodic traffic statistics update (mirrors client processing loops).
-            _ = sleep(stat_save_iter) => {
+            // Periodic traffic statistics update: interval ticks are scheduled on the tokio timer wheel, so they fire even when I/O branches stay hot (the immediate first tick is a no-op while counters are zero).
+            _ = stat_tick.tick() => {
                 if in_bytes + out_bytes + error_count > 0 {
                     update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
                     (in_bytes, out_bytes, error_count) = (0, 0, 0);
