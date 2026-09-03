@@ -18,6 +18,10 @@ The `android_ui_tpl` directory contains a minimal, functional Android project wr
 
 > **Note**: This template includes only the essential files required to demonstrate integration and functionality. It is not a full-featured production app but provides a solid foundation for customization.
 
+## Screenshot
+
+![Screenshot](screen_1.png)
+
 ## How to build so-files
 
 First, ensure that the NDK is configured in Android Studio. Verify the `NDK_HOME` value in `.cargo/config.toml`. Then, run the following script to generate and copy the native libraries into your Android project:
@@ -25,3 +29,7 @@ First, ensure that the NDK is configured in Android Studio. Verify the `NDK_HOME
 ```bash
 ./update_lib_files.sh ~/AndroidStudioProjects/<UI app project name>/
 ```
+
+## LLM-assisted development
+
+Local LLM models (`qwen3.8:27b`, `muse-glimmer:30b`) were used during development in a moderate and careful manner. Unfortunately, I have limited experience in creating UI for Android, so most of the Kotlin code was written by these models.

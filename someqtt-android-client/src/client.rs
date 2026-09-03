@@ -33,10 +33,10 @@ async fn server_connection(
     let mut transfer_out: usize = 0;
     let mut transfer_error: usize = 0;
     let update_stat_delay = settings.reconnect_delay(0) * 2;
-    let stat_key_all = format!("out-connection-{}", service_name);
-    let metric_no_route_key = format!("no-route-error-{}", connection_info);
+    let stat_key_all = format!("out-c-{}", service_name);
+    let metric_no_route_key = format!("route-err-{}", connection_info);
     let metric_format_err_key = format!("format-error-{}", connection_info);
-    let conn_key = format!("to-server-out-{}", connection_info);
+    let conn_key = format!("to-serv-out-{}", connection_info);
     let mut done = false;
     add_connection(&conn_key).await;
 

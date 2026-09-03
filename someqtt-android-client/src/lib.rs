@@ -191,7 +191,7 @@ pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getV
     _env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    let info = "SoMeQTT client 0.1.5".to_string();
+    let info = "SoMeQTT client 0.1.6".to_string();
     match _env.new_string(&info) {
         Ok(output) => output.into_raw(),
         Err(_) => std::ptr::null_mut(),
