@@ -29,6 +29,7 @@ const ENV_SERVER_PORT: &str = "SERVER_PORT";
 const ENV_LOADING_LEVEL: &str = "LOADING_LEVEL";
 const ENV_ALLOW_NET: &str = "ALLOW_NET";
 const ENV_STAT_SAVE_INTERVAL: &str = "STAT_SAVE_INTERVAL";
+const ENV_TRANSPORT: &str = "TRANSPORT";
 
 pub const DEFAULT_STAT_FILEPATH: &str = "/tmp/stat.txt";
 pub type IpPortMap = HashMap<String, HashMap<IpAddr, u16>>;
@@ -40,6 +41,12 @@ pub enum LoadingLevelEnum {
     Default,
     Low,
     High,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum TransportTypeEnum {
+    Mqtt,
+    Http,
 }
 
 #[derive(PartialEq, Debug)]
@@ -72,6 +79,29 @@ impl FromStr for LoadingLevelEnum {
             "extremely" => Ok(LoadingLevelEnum::Extremely),
             "low" => Ok(LoadingLevelEnum::Low),
             _ => Err(format!("Invalid loading level: '{}'", s)),
+        }
+    }
+}
+
+impl fmt::Display for TransportTypeEnum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let txt = match self {
+            TransportTypeEnum::Mqtt => "MQTT",
+            TransportTypeEnum::Http => "HTTP",
+        };
+        write!(f, "{}", txt)
+    }
+}
+
+impl FromStr for TransportTypeEnum {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().trim() {
+            "" => Ok(TransportTypeEnum::Mqtt),
+            "mqtt" => Ok(TransportTypeEnum::Mqtt),
+            "http" => Ok(TransportTypeEnum::Http),
+            _ => Err(format!("Invalid transport type: '{}'", s)),
         }
     }
 }
@@ -240,16 +270,25 @@ pub struct Settings {
     pub udp_bind_from: String,
     pub loading_level: LoadingLevelEnum,
     pub networks: Vec<IpNetwork>,
-    pub client_name: Uuid
+    pub client_name: Uuid,
+    pub transport: TransportTypeEnum
 }
 
 pub trait EncryptionData {
     fn main_cipher_key(&self) -> String;
+    fn is_server(&self) -> bool;
+    fn transport(&self) -> TransportTypeEnum;
 }
 
 impl EncryptionData for Settings {
     fn main_cipher_key(&self) -> String {
         self.cipher_key.clone()
+    }
+    fn is_server(&self) -> bool {
+        self.is_server
+    }
+    fn transport(&self) -> TransportTypeEnum {
+        self.transport.clone()
     }
 }
 
@@ -502,7 +541,15 @@ pub fn create_settings(overrides: &CliOverrides) -> Settings {
     if udp_bind_from.is_empty() {udp_bind_from = "0.0.0.0:0".to_string();}
     let mut server_host = _read_env_str(ENV_SERVER_HOST, is_server);
     if is_server && server_host.is_empty() {server_host = "0.0.0.0".to_string();}
-    let server_port = _read_env_uint(ENV_SERVER_PORT, true, 1883) as u16;
+    let transport = match TransportTypeEnum::from_str(&_read_env_str(ENV_TRANSPORT, true)) {
+        Ok(val) => val,
+        Err(_) => TransportTypeEnum::Mqtt,
+    };
+    let default_port = match transport {
+        TransportTypeEnum::Mqtt => 1883,
+        TransportTypeEnum::Http => 8080,
+    };
+    let server_port = _read_env_uint(ENV_SERVER_PORT, true, default_port as usize) as u16;
     let loading_level = match LoadingLevelEnum::from_str(
         &_read_env_str(ENV_LOADING_LEVEL, true)
     ) {
@@ -543,6 +590,7 @@ pub fn create_settings(overrides: &CliOverrides) -> Settings {
         networks,
         stat_filepath,
         client_name: generate_client_name(),
+        transport,
     };
     if settings.buffer_size < 1024 {
         settings.buffer_size = settings.default_buffer_size();
@@ -729,6 +777,7 @@ mod tests {
             loading_level: LoadingLevelEnum::Default,
             networks: Vec::new(),
             client_name: fast_name(),
+            transport: TransportTypeEnum::Mqtt,
         }
     }
 }

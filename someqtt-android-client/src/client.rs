@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_create_settings_empty_sockets() {
-        let settings = crate::settings::create_settings("127.0.0.1", 8883, "", "", "", false);
+        let settings = crate::settings::create_settings("127.0.0.1", 8883, "", "", "", false, "");
         assert!(settings.tcp_sockets.is_empty());
         assert!(settings.udp_sockets.is_empty());
     }
@@ -652,7 +652,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_service_with_tcp_socket() {
         let tcp = "svc1:127.0.0.1:9001";
-        let settings = crate::settings::create_settings("127.0.0.1", 8883, "", tcp, "", false);
+        let settings = crate::settings::create_settings("127.0.0.1", 8883, "", tcp, "", false, "");
         assert_eq!(settings.tcp_sockets.len(), 1);
 
         static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

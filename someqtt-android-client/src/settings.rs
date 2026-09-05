@@ -25,6 +25,35 @@ pub enum LoadingLevelEnum {
     High,
 }
 
+#[derive(Clone, PartialEq, Debug)]
+pub enum TransportTypeEnum {
+    Mqtt,
+    Http,
+}
+
+impl fmt::Display for TransportTypeEnum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let txt = match self {
+            TransportTypeEnum::Mqtt => "MQTT",
+            TransportTypeEnum::Http => "HTTP",
+        };
+        write!(f, "{}", txt)
+    }
+}
+
+impl FromStr for TransportTypeEnum {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().trim() {
+            "" => Ok(TransportTypeEnum::Mqtt),
+            "mqtt" => Ok(TransportTypeEnum::Mqtt),
+            "http" => Ok(TransportTypeEnum::Http),
+            _ => Err(format!("Invalid transport type: '{}'", s)),
+        }
+    }
+}
+
 impl fmt::Display for LoadingLevelEnum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let txt = match self {
@@ -125,6 +154,7 @@ pub struct Settings {
     pub idle_udp_limit: Duration,
     pub loading_level: LoadingLevelEnum,
     pub verbose: bool,
+    pub transport: TransportTypeEnum,
 }
 
 impl Settings {
@@ -135,11 +165,15 @@ impl Settings {
 
 pub trait EncryptionData {
     fn main_cipher_key(&self) -> String;
+    fn transport(&self) -> TransportTypeEnum;
 }
 
 impl EncryptionData for Settings {
     fn main_cipher_key(&self) -> String {
         self.cipher_key.clone()
+    }
+    fn transport(&self) -> TransportTypeEnum {
+        self.transport.clone()
     }
 }
 
@@ -224,7 +258,7 @@ impl LoadingParams for Settings {
 
 /// Creates and configures application settings from environment variables.
 /// Returns a fully initialized Settings struct with defaults for missing values.
-pub fn create_settings(server_host: &str, server_port: u16, key: &str, tcp_settings: &str, udp_settings: &str, verbose: bool) -> Settings {
+pub fn create_settings(server_host: &str, server_port: u16, key: &str, tcp_settings: &str, udp_settings: &str, verbose: bool, transport_str: &str) -> Settings {
     let client_name = format!("ph-{}", fast_name());
     let stat_save_iter = Duration::from_secs(120) + Duration::from_millis(rand::random_range(100..500));
     let tcp_sockets = _read_env_socket_maps(&tcp_settings, true);
@@ -232,6 +266,10 @@ pub fn create_settings(server_host: &str, server_port: u16, key: &str, tcp_setti
     let idle_tcp_limit = Duration::from_secs(60 * 3);
     let idle_udp_limit = Duration::from_secs(60 * 2);
     let loading_level = LoadingLevelEnum::Extremely;
+    let transport = match TransportTypeEnum::from_str(transport_str) {
+        Ok(t) => t,
+        Err(_) => TransportTypeEnum::Mqtt,
+    };
     let mut settings = Settings {
         server_host: server_host.to_string(),
         server_port,
@@ -245,6 +283,7 @@ pub fn create_settings(server_host: &str, server_port: u16, key: &str, tcp_setti
         idle_udp_limit,
         loading_level,
         verbose,
+        transport,
     };
     settings.buffer_size = settings.default_buffer_size();
     settings
@@ -323,6 +362,7 @@ mod tests {
             idle_udp_limit: Duration::from_secs(120),
             loading_level: LoadingLevelEnum::Default,
             verbose: false,
+            transport: TransportTypeEnum::Mqtt,
         };
         assert_eq!(settings.default_buffer_size(), 4 * 1024);
         assert_eq!(settings.channel_size(), (500, 500));
@@ -344,6 +384,7 @@ mod tests {
             idle_udp_limit: Duration::from_secs(120),
             loading_level: LoadingLevelEnum::Extremely,
             verbose: false,
+            transport: TransportTypeEnum::Mqtt,
         };
         assert_eq!(settings.default_buffer_size(), 8 * 1024);
         assert_eq!(settings.channel_size(), (1000, 800));
@@ -365,6 +406,7 @@ mod tests {
             idle_udp_limit: Duration::from_secs(120),
             loading_level: LoadingLevelEnum::Default, // max_sec = 5
             verbose: false,
+            transport: TransportTypeEnum::Mqtt,
         };
         let delay_0 = settings.reconnect_delay(0);
         assert_eq!(delay_0.as_millis(), 1000); // min_ms
@@ -378,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_create_settings() {
-        let settings = create_settings("localhost", 8080, "secret_key", "", "", false);
+        let settings = create_settings("localhost", 8080, "secret_key", "", "", false, "");
         assert_eq!(settings.server_host, "localhost");
         assert_eq!(settings.server_port, 8080);
         assert_eq!(settings.cipher_key, "secret_key");
@@ -402,6 +444,7 @@ mod tests {
             idle_udp_limit: Duration::from_secs(120),
             loading_level: LoadingLevelEnum::Default,
             verbose: false,
+            transport: TransportTypeEnum::Mqtt,
         };
 
         assert_eq!(settings.main_cipher_key(), "my_secret");

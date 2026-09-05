@@ -32,8 +32,9 @@ class RustNetworkService : Service() {
         val tcpSettings = intent?.getStringExtra("tcp_settings") ?: ""
         val udpSettings = intent?.getStringExtra("udp_settings") ?: ""
         val verbose = intent?.getBooleanExtra("verbose", false) ?: false
+        val transport = intent?.getStringExtra("transport") ?: "mqtt"
         if (!isRunning && host.isNotEmpty() && port > 0) {
-            startRustRuntime(host, port, authKey, tcpSettings, udpSettings, verbose)
+            startRustRuntime(host, port, authKey, tcpSettings, udpSettings, verbose, transport)
         }
         return START_STICKY
     }
@@ -44,7 +45,8 @@ class RustNetworkService : Service() {
         authKey: String,
         tcpSettings: String,
         udpSettings: String,
-        verbose: Boolean
+        verbose: Boolean,
+        transport: String
     ) {
         if (isRunning) return
         isRunning = true
@@ -58,7 +60,7 @@ class RustNetworkService : Service() {
 
         try {
             startForeground(NOTIFICATION_ID, notification)
-            MainActivity.startServer(host, port, authKey, tcpSettings, udpSettings, verbose)
+            MainActivity.startServer(host, port, authKey, tcpSettings, udpSettings, verbose, transport)
             Log.d(TAG, "Rust server started in service")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start Rust server", e)

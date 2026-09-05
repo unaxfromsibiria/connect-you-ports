@@ -1,5 +1,7 @@
 #!/bin/bash
 
+RUST_BACKTRACE=1 cargo test
+
 RAW_NDK_PATH=$(cat .cargo/config.toml | grep NDK_HOME | cut -d '"' -f2)
 
 if [ -z "$RAW_NDK_PATH" ]; then
@@ -11,7 +13,6 @@ NDK_PATH=$(realpath "$RAW_NDK_PATH" 2>/dev/null)
 
 echo "NDK_HOME exists at: $NDK_PATH"
 
-cargo test
 cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 build --release
 
 if [ -z "$1" ]; then

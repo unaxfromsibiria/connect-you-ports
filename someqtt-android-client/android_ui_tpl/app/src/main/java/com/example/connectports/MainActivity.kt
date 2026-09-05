@@ -26,6 +26,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_SERVER_HOST = "server_host"
         private const val KEY_SERVER_PORT = "server_port"
         private const val KEY_AUTH_KEY = "auth_key"
+        private const val KEY_TRANSPORT = "transport"
         private const val KEY_VERBOSE_LOGS = "verbose_logs"
 
         init {
@@ -43,7 +44,8 @@ class MainActivity : AppCompatActivity() {
             authKey: String,
             tcpSettings: String,
             udpSettings: String,
-            verbose: Boolean
+            verbose: Boolean,
+            transport: String,
         )
 
         external fun stopServer()
@@ -59,6 +61,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var serverHostInput: EditText
     private lateinit var serverPortInput: EditText
     private lateinit var authKeyInput: EditText
+    private lateinit var transportSpinner: Spinner
     private lateinit var verboseLogsCheckbox: CheckBox
     private lateinit var prefs: SharedPreferences
     private lateinit var versionTextView: TextView
@@ -157,6 +160,43 @@ class MainActivity : AppCompatActivity() {
             setPadding(8, 8, 8, 8)
         }
 
+        transportSpinner = Spinner(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 8 }
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_item,
+                listOf("mqtt", "http")
+            ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+            setSelection(0)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
+                    val selected = parent.getItemAtPosition(position)?.toString()?.lowercase() ?: "mqtt"
+                    val portText = serverPortInput.text.toString().trim()
+                    if (portText.isNotEmpty()) {
+                        val currentPort = portText.toIntOrNull()
+                        if (currentPort != null) {
+                            when (selected) {
+                                "mqtt" -> {
+                                    if (currentPort == 8080) {
+                                        serverPortInput.setText("1883")
+                                    }
+                                }
+                                "http" -> {
+                                    if (currentPort == 1883) {
+                                        serverPortInput.setText("8080")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                override fun onNothingSelected(parent: AdapterView<*>) {}
+            }
+        }
+
         verboseLogsCheckbox = CheckBox(this).apply {
             text = "Verbose logs"
             layoutParams = LinearLayout.LayoutParams(
@@ -167,6 +207,21 @@ class MainActivity : AppCompatActivity() {
 
         globalSettingsLayout.addView(serverRowLayout)
         globalSettingsLayout.addView(authKeyInput)
+        val transportRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 8 }
+            val spinnerParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT).apply { weight = 1f }
+            transportSpinner.layoutParams = spinnerParams
+            addView(transportSpinner)
+            addView(TextView(this@MainActivity).apply {
+                text = "transport type"
+                setPadding(8, 8, 8, 8)
+            })
+        }
+        globalSettingsLayout.addView(transportRow)
         globalSettingsLayout.addView(verboseLogsCheckbox)
         rootLayout.addView(globalSettingsLayout)
 
@@ -336,6 +391,7 @@ class MainActivity : AppCompatActivity() {
         val configs = collectAndLogConfigurations()
         val verbose = verboseLogsCheckbox.isChecked
         val authKey = authKeyInput.text.toString()
+        val transport = transportSpinner.selectedItem?.toString()?.lowercase() ?: "mqtt"
         try {
             Log.d(TAG, "Starting server via Service...")
             val intent = Intent(this, RustNetworkService::class.java).apply {
@@ -345,6 +401,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra("tcp_settings", configs.tcp)
                 putExtra("udp_settings", configs.udp)
                 putExtra("verbose", verbose)
+                putExtra("transport", transport)
             }
 
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
@@ -385,6 +442,7 @@ class MainActivity : AppCompatActivity() {
         serverHostInput.isEnabled = enabled
         serverPortInput.isEnabled = enabled
         authKeyInput.isEnabled = enabled
+        transportSpinner.isEnabled = enabled
         verboseLogsCheckbox.isEnabled = enabled
         btnAddRow.isEnabled = enabled
 
@@ -527,11 +585,13 @@ class MainActivity : AppCompatActivity() {
         val host = serverHostInput.text.toString().trim()
         val port = serverPortInput.text.toString().trim()
         val key = authKeyInput.text.toString()
+        val transport = transportSpinner.selectedItem?.toString()?.lowercase() ?: "mqtt"
         val verbose = verboseLogsCheckbox.isChecked
         prefs.edit()
             .putString(KEY_SERVER_HOST, host)
             .putString(KEY_SERVER_PORT, port)
             .putString(KEY_AUTH_KEY, key)
+            .putString(KEY_TRANSPORT, transport)
             .putBoolean(KEY_VERBOSE_LOGS, verbose)
             .apply()
     }
@@ -540,10 +600,13 @@ class MainActivity : AppCompatActivity() {
         val host = prefs.getString(KEY_SERVER_HOST, "") ?: ""
         val port = (prefs.getString(KEY_SERVER_PORT, "1883") ?: "").ifBlank { "1883" }
         val key = prefs.getString(KEY_AUTH_KEY, "") ?: ""
+        val transport = prefs.getString(KEY_TRANSPORT, "mqtt") ?: "mqtt"
         val verbose = prefs.getBoolean(KEY_VERBOSE_LOGS, false)
         serverHostInput.setText(host.ifBlank { "127.0.0.1" })
         serverPortInput.setText(port)
         authKeyInput.setText(key)
+        val idx = if (transport == "http") 1 else 0
+        transportSpinner.setSelection(idx)
         verboseLogsCheckbox.isChecked = verbose
     }
 

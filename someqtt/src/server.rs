@@ -17,8 +17,9 @@ use uuid::Uuid;
 
 use crate::data::{DataHandler, DataHandlerSettings, DataMessageError};
 use crate::route::{exists, send_data, add_route, remove_route, set_channel_size, run_cleanup};
-use crate::settings::{code_name, part_uuid, Settings, LoadingParams, OUT_TTL, TaskResultEnum};
+use crate::settings::{code_name, part_uuid, Settings, LoadingParams, OUT_TTL, TaskResultEnum, TransportTypeEnum};
 use crate::stat::{add_connection, lost_connection, periodic_dump, update_metric, update_traffic_stats};
+use crate::transport::forbidden_response;
 
 static SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -340,6 +341,8 @@ async fn handle_connection(
     let mut send_dead = false;
     // Number of valid MQTT frames with undecryptable content or unknown service for this peer.
     let mut wrong_attempt = 0;
+    let mut send_forbidden = false;
+    let mut unknown_client = true;
 
     loop {
         tokio::select! {
@@ -357,6 +360,7 @@ async fn handle_connection(
                                 match resolve_target(&msg.service, settings) {
                                     Some(cfg) => {
                                         if !(exists(&transfer_id).await) {
+                                            unknown_client = false;
                                             info!(
                                                 "New transfer from {} service={}({}) target={}:{} proto={} transfer={}",
                                                 peer_addr,
@@ -402,6 +406,7 @@ async fn handle_connection(
                                             "Service key {} not configured on server (from {}, transfer: {})",
                                             part_uuid(&msg.service), peer_addr, part_uuid(&transfer_id)
                                         );
+                                        send_forbidden = settings.transport == TransportTypeEnum::Http;
                                         break;
                                     }
                                 }
@@ -412,11 +417,13 @@ async fn handle_connection(
                                 wrong_attempt += 1;
                                 update_metric(&format!("suspicious-{}", ip_str), wrong_attempt).await;
                                 warn!("Suspicious message from {} (valid structure, undecryptable content)", peer_addr);
+                                send_forbidden = settings.transport == TransportTypeEnum::Http;
                                 break;
                             },
                             Err(err) => {
                                 error_count += 1;
                                 error!("Invalid message format from {}: {}", peer_addr, err);
+                                send_forbidden = settings.transport == TransportTypeEnum::Http;
                                 break;
                             }
                         }
@@ -424,6 +431,7 @@ async fn handle_connection(
                     Some(Err(err)) => {
                         error_count += 1;
                         error!("Frame read error from {}: {}", peer_addr, err);
+                        send_forbidden = settings.transport == TransportTypeEnum::Http;
                         break;
                     },
                     None => {
@@ -528,7 +536,11 @@ async fn handle_connection(
         sleep(collect_timeout).await;
         remove_route(&transfer).await;
     }
-
+    if send_forbidden && unknown_client {
+        let packet_forbidden = forbidden_response();
+        let mut raw_stream = framed.into_inner(); 
+        raw_stream.write_all(&packet_forbidden).await.unwrap();
+    }
     if in_bytes + out_bytes + error_count > 0 {
         update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
     }
@@ -665,6 +677,7 @@ mod tests {
             loading_level: crate::settings::LoadingLevelEnum::Default,
             networks: Vec::new(),
             client_name: Uuid::new_v4(),
+            transport: TransportTypeEnum::Mqtt,
         }
     }
 

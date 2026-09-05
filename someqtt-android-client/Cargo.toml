@@ -1,7 +1,7 @@
 [package]
 name = "socket_phone"
 # copy of main project version
-version = "0.1.6"
+version = "0.2.0"
 edition = "2024"
 
 [lib]
@@ -22,3 +22,4 @@ aes-gcm = { version = "~0.11" }
 hex = "*"
 rand = { version = "~0.10" }
 sha1 = "~0.11"
+base64 = { version = "~0.23" }

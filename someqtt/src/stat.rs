@@ -33,11 +33,18 @@ impl Stat {
         let mut output = String::from("traffic:\n");
         for (key, (in_value, out_value)) in &self.traffic {
             let print_value = |value: usize| -> (f64, &'static str) {
-                if value >= 1024 * 1024 {
-                    let mb = (value as f64 / (1024.0 * 1024.0)) * 10.0;
+                let v = value as f64;
+                if v >= 1024.0 * 1024.0 * 1024.0 * 1024.0 {
+                    let tb = v / (1024.0 * 1024.0 * 1024.0 * 1024.0) * 10.0;
+                    (tb.round() / 10.0, "tb")
+                } else if v >= 1024.0 * 1024.0 * 1024.0 {
+                    let gb = v / (1024.0 * 1024.0 * 1024.0) * 10.0;
+                    (gb.round() / 10.0, "gb")
+                } else if v >= 1024.0 * 1024.0 {
+                    let mb = v / (1024.0 * 1024.0) * 10.0;
                     (mb.round() / 10.0, "mb")
                 } else {
-                    let kb = (value as f64 / 1024.0) * 10.0;
+                    let kb = v / 1024.0 * 10.0;
                     (kb.round() / 10.0, "kb")
                 }
             };

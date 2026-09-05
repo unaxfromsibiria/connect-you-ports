@@ -100,6 +100,7 @@ pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_star
     tcp_settings_jstr: JString,
     udp_settings_jstr: JString,
     verbose_jboolean: jboolean,
+    transport_jstr: JString,
 ) {
     init_android_logger();
     let host: String = match _env.get_string(&host_jstr) {
@@ -130,6 +131,13 @@ pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_star
             return;
         },
     };
+    let transport: String = match _env.get_string(&transport_jstr) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            error!("Failed to get transport type string from Java");
+            return;
+        },
+    };
     let port = port_jint as u16;
     info!("Create connection to server {}:{}", host, port);
     let state = get_state();
@@ -143,7 +151,7 @@ pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_star
         *err_lock = None;
     }
     let verbose = (verbose_jboolean as u8) > 0;
-    let settings = create_settings(&host, port, &key, &tcp_settings, &udp_settings, verbose);
+    let settings = create_settings(&host, port, &key, &tcp_settings, &udp_settings, verbose, &transport);
     if settings.verbose {
         info!("Spawning background thread for server");
     }
@@ -191,7 +199,7 @@ pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getV
     _env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    let info = "SoMeQTT client 0.1.6".to_string();
+    let info = "SoMeQTT client 0.2.0".to_string();
     match _env.new_string(&info) {
         Ok(output) => output.into_raw(),
         Err(_) => std::ptr::null_mut(),

@@ -5,8 +5,8 @@ use log::{error, info};
 use std::fmt;
 use uuid::Uuid;
 
-use crate::settings::EncryptionData;
-use crate::transport::{create_packet, extract_mqtt_payload};
+use crate::settings::{EncryptionData, TransportTypeEnum};
+use crate::transport::{create_packet, extract_payload};
 
 #[derive(Debug, PartialEq)]
 pub enum DataMessageError {
@@ -107,6 +107,7 @@ impl DataMsg {
 pub struct DataHandlerSettings {
     cipher: Option<Aes256Gcm>,
     encryption: bool,
+    transport: TransportTypeEnum,
 }
 
 pub trait DataHandler: Sized {
@@ -121,6 +122,7 @@ impl DataHandler for DataHandlerSettings {
         let mut handler = DataHandlerSettings {
             cipher: None,
             encryption: false,
+            transport: settings.transport(),
         };
         let cipher_key = settings.main_cipher_key();
         if !cipher_key.is_empty() {
@@ -175,18 +177,18 @@ impl DataHandler for DataHandlerSettings {
             data: Bytes::from(msg_data),
         };
         let payload = msg.dump();
-        create_packet(&payload, *transfer)
+        create_packet(&payload, *transfer, self.transport.clone())
     }
 
     fn make_quit_message(&self, service: &Uuid, transfer: &Uuid) -> Bytes {
         let msg = DataMsg::new_quit(service);
         let payload = msg.dump();
-        create_packet(&payload, *transfer)
+        create_packet(&payload, *transfer, self.transport.clone())
     }
 
     fn load_data_message(&self, data: &[u8]) -> Result<(DataMsg, Uuid), DataMessageError> {
         let packet = Bytes::from(data.to_vec());
-        let (topic_str, _, _, payload) = match extract_mqtt_payload(&packet) {
+        let (topic_str, _, _, payload) = match extract_payload(&packet, self.transport.clone()) {
             Ok(v) => v,
             Err(e) => return Err(DataMessageError::Malformed(format!("MQTT parse error: {:?}", e))),
         };
@@ -246,6 +248,7 @@ mod tests {
         fn main_cipher_key(&self) -> String {
             self.key.clone()
         }
+        fn transport(&self) -> TransportTypeEnum { TransportTypeEnum::Mqtt }
     }
 
     const VALID_KEY: &str = "f6a5a635556a59f6eef8a65c7d146d2f138941accaa70547d27b9286b958ad7b";
@@ -270,8 +273,8 @@ mod tests {
         Uuid::new_v4()
     }
 
-    fn extract_msg(packet: &Bytes) -> DataMsg {
-        let (_, _, _, payload) = extract_mqtt_payload(packet).expect("parse packet");
+    fn extract_msg_intest(packet: &Bytes) -> DataMsg {
+        let (_, _, _, payload) = extract_payload(packet, TransportTypeEnum::Mqtt).expect("parse packet");
         DataMsg::load(&payload).expect("load msg")
     }
 
@@ -285,7 +288,7 @@ mod tests {
         let service = get_uuid();
         let transfer = get_uuid();
         let packet = handler.make_data_message(&data, &service, &transfer);
-        let msg = extract_msg(&packet);
+        let msg = extract_msg_intest(&packet);
         assert_eq!(msg.service, service);
         assert!(msg.nonce.is_empty());
         assert_eq!(msg.data, data);
@@ -305,7 +308,7 @@ mod tests {
         let service = get_uuid();
         let transfer = get_uuid();
         let packet = handler.make_data_message(&data, &service, &transfer);
-        let msg = extract_msg(&packet);
+        let msg = extract_msg_intest(&packet);
         assert_eq!(msg.service, service);
         assert!(!msg.nonce.is_empty());
         assert_ne!(msg.data, data);
@@ -411,7 +414,7 @@ mod tests {
         let service = get_uuid();
         let transfer = get_uuid();
         let packet = handler.make_quit_message(&service, &transfer);
-        let msg = extract_msg(&packet);
+        let msg = extract_msg_intest(&packet);
         assert_eq!(msg.service, service);
         assert!(msg.nonce.is_empty());
         assert!(msg.data.is_empty());
@@ -426,7 +429,7 @@ mod tests {
         let service = get_uuid();
         let transfer = get_uuid();
         let packet = handler.make_data_message(&data, &service, &transfer);
-        let msg = extract_msg(&packet);
+        let msg = extract_msg_intest(&packet);
         assert_eq!(msg.service, service);
         assert_eq!(msg.data, data);
     }
@@ -450,8 +453,8 @@ mod tests {
         let transfer = get_uuid();
         let packet1 = handler.make_data_message(&data, &service, &transfer);
         let packet2 = handler.make_data_message(&data, &service, &transfer);
-        let msg1 = extract_msg(&packet1);
-        let msg2 = extract_msg(&packet2);
+        let msg1 = extract_msg_intest(&packet1);
+        let msg2 = extract_msg_intest(&packet2);
 
         assert!(!msg1.nonce.is_empty());
         assert!(!msg2.nonce.is_empty());
