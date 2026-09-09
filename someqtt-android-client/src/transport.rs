@@ -35,21 +35,37 @@ fn escape_json_string(s: &str) -> String {
     out
 }
 
-fn create_http_packet(payload: &Bytes, topic: uuid::Uuid) -> Bytes {
+fn create_http_packet(payload: &Bytes, topic: uuid::Uuid, server_side: bool) -> Bytes {
     let topic_str = topic.to_string();
     let encoded = encode_base64(payload.as_ref());
     let escaped = escape_json_string(&encoded);
-    let json_body = format!(r#"{{"img":"{}"}}"#, escaped);
-    let request_line = format!("POST /image/{}.json HTTP/1.1\r\n", topic_str);
-    let headers = format!(
-        "Host: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-        json_body.len()
-    );
-    let mut buf = BytesMut::new();
-    buf.extend_from_slice(request_line.as_bytes());
-    buf.extend_from_slice(headers.as_bytes());
-    buf.extend_from_slice(json_body.as_bytes());
-    buf.freeze()
+    if server_side {
+        // HTTP response body carrying both topic (name) and payload (img).
+        let json_body = format!(r#"{{"name":"{}","img":"{}"}}"#, topic_str, escaped);
+        let response_line = "HTTP/1.1 200 OK\r\n";
+        let headers = format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            json_body.len()
+        );
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(response_line.as_bytes());
+        buf.extend_from_slice(headers.as_bytes());
+        buf.extend_from_slice(json_body.as_bytes());
+        buf.freeze()
+    } else {
+        // HTTP request carrying only the payload.
+        let json_body = format!(r#"{{"img":"{}"}}"#, escaped);
+        let request_line = format!("POST /image/{}.json HTTP/1.1\r\n", topic_str);
+        let headers = format!(
+            "Host: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            json_body.len()
+        );
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(request_line.as_bytes());
+        buf.extend_from_slice(headers.as_bytes());
+        buf.extend_from_slice(json_body.as_bytes());
+        buf.freeze()
+    }
 }
 
 fn create_mqtt_packet(payload: &Bytes, topic: uuid::Uuid) -> Bytes {
@@ -58,7 +74,7 @@ fn create_mqtt_packet(payload: &Bytes, topic: uuid::Uuid) -> Bytes {
     let retain = false;
     let dup = false;
     let flags = ((dup as u8) << 3) | ((qos & 0x03) << 1) | (retain as u8);
-    let first_byte = 0x30 | flags; // 0x30 = PUBLISH packet type
+    let first_byte = 0x30 | flags; // PUBLISH packet type
     let topic_str = topic.to_string();
     let topic_bytes = topic_str.as_bytes();
     let topic_len = topic_bytes.len() as u16;
@@ -92,60 +108,105 @@ fn create_mqtt_packet(payload: &Bytes, topic: uuid::Uuid) -> Bytes {
     buf.freeze()
 }
 
-pub fn create_packet(payload: &Bytes, topic: uuid::Uuid, transport: TransportTypeEnum) -> Bytes {
+pub fn create_packet(payload: &Bytes, topic: uuid::Uuid, transport: TransportTypeEnum, server_side: bool) -> Bytes {
     match transport {
         TransportTypeEnum::Mqtt => create_mqtt_packet(payload, topic),
-        TransportTypeEnum::Http => create_http_packet(payload, topic),
+        TransportTypeEnum::Http => create_http_packet(payload, topic, server_side),
     }
 }
 
-pub fn extract_http_payload(packet: &Bytes) -> Result<(String, u8, bool, Bytes), TransportParseError> {
+pub fn extract_http_payload(packet: &Bytes, server_side: bool) -> Result<(String, u8, bool, Bytes), TransportParseError> {
     let data = std::str::from_utf8(packet).map_err(|_| TransportParseError::InsufficientData)?;
-    let mut lines = data.split("\r\n");
-    let request_line = lines.next().ok_or(TransportParseError::InsufficientData)?;
-    let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 2 {
-        return Err(TransportParseError::InsufficientData);
-    }
-    let path = parts[1];
-    let prefix = "/image/";
-    let suffix = ".json";
-    if !path.starts_with(prefix) || !path.ends_with(suffix) {
-        return Err(TransportParseError::InsufficientData);
-    }
-    let topic = &path[prefix.len()..path.len() - suffix.len()];
-    let rest = data[request_line.len()..].trim_start_matches("\r\n");
-    let header_end = rest.find("\r\n\r\n").ok_or(TransportParseError::InsufficientData)?;
-    let body_str = &rest[header_end + 4..];
-    let img_marker = "\"img\":\"";
-    let start_idx = body_str.find(img_marker).ok_or(TransportParseError::InsufficientData)? + img_marker.len();
-    let mut encoded_chars = Vec::new();
-    let mut i = start_idx;
-    let bytes = body_str.as_bytes();
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'"' {
-            break;
+    if server_side {
+        // Parse an HTTP request: topic comes from the /image/<topic>.json path.
+        let mut lines = data.split("\r\n");
+        let request_line = lines.next().ok_or(TransportParseError::InsufficientData)?;
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
+        if parts.len() < 2 {
+            return Err(TransportParseError::InsufficientData);
         }
-        if b == b'\\' {
-            i += 1;
-            if i >= bytes.len() { break; }
-            match bytes[i] {
-                b'"' => encoded_chars.push(b'"'),
-                b'\\' => encoded_chars.push(b'\\'),
-                b'n' => encoded_chars.push(b'\n'),
-                b'r' => encoded_chars.push(b'\r'),
-                b't' => encoded_chars.push(b'\t'),
-                _ => encoded_chars.push(bytes[i]),
+        let path = parts[1];
+        let prefix = "/image/";
+        let suffix = ".json";
+        if !path.starts_with(prefix) || !path.ends_with(suffix) {
+            return Err(TransportParseError::InsufficientData);
+        }
+        let topic = &path[prefix.len()..path.len() - suffix.len()];
+        let rest = data[request_line.len()..].trim_start_matches("\r\n");
+        let header_end = rest.find("\r\n\r\n").ok_or(TransportParseError::InsufficientData)?;
+        let body_str = &rest[header_end + 4..];
+        let img_marker = "\"img\":\"";
+        let start_idx = body_str.find(img_marker).ok_or(TransportParseError::InsufficientData)? + img_marker.len();
+        let mut encoded_chars = Vec::new();
+        let mut i = start_idx;
+        let bytes = body_str.as_bytes();
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'"' {
+                break;
             }
-        } else {
-            encoded_chars.push(b);
+            if b == b'\\' {
+                i += 1;
+                if i >= bytes.len() { break; }
+                match bytes[i] {
+                    b'"' => encoded_chars.push(b'"'),
+                    b'\\' => encoded_chars.push(b'\\'),
+                    b'n' => encoded_chars.push(b'\n'),
+                    b'r' => encoded_chars.push(b'\r'),
+                    b't' => encoded_chars.push(b'\t'),
+                    _ => encoded_chars.push(bytes[i]),
+                }
+            } else {
+                encoded_chars.push(b);
+            }
+            i += 1;
         }
-        i += 1;
+        let encoded = String::from_utf8(encoded_chars).map_err(|_| TransportParseError::InsufficientData)?;
+        let payload_bytes = decode_base64(&encoded).map_err(|_| TransportParseError::InsufficientData)?;
+        Ok((topic.to_string(), 0, false, Bytes::from(payload_bytes)))
+    } else {
+        // Parse an HTTP response: topic comes from the "name" field of the body.
+        let header_end = data.find("\r\n\r\n").ok_or(TransportParseError::InsufficientData)?;
+        let body_str = &data[header_end + 4..];
+        let name_marker = "\"name\":\"";
+        let name_start = body_str.find(name_marker).ok_or(TransportParseError::InsufficientData)? + name_marker.len();
+        let mut topic_chars = Vec::new();
+        let bytes = body_str.as_bytes();
+        let mut i = name_start;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'"' { break; }
+            topic_chars.push(b);
+            i += 1;
+        }
+        let topic = String::from_utf8(topic_chars).map_err(|_| TransportParseError::InsufficientData)?;
+        let img_marker = "\"img\":\"";
+        let img_start = body_str.find(img_marker).ok_or(TransportParseError::InsufficientData)? + img_marker.len();
+        let mut encoded_chars = Vec::new();
+        i = img_start;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'"' { break; }
+            if b == b'\\' {
+                i += 1;
+                if i >= bytes.len() { break; }
+                match bytes[i] {
+                    b'"' => encoded_chars.push(b'"'),
+                    b'\\' => encoded_chars.push(b'\\'),
+                    b'n' => encoded_chars.push(b'\n'),
+                    b'r' => encoded_chars.push(b'\r'),
+                    b't' => encoded_chars.push(b'\t'),
+                    _ => encoded_chars.push(bytes[i]),
+                }
+            } else {
+                encoded_chars.push(b);
+            }
+            i += 1;
+        }
+        let encoded = String::from_utf8(encoded_chars).map_err(|_| TransportParseError::InsufficientData)?;
+        let payload_bytes = decode_base64(&encoded).map_err(|_| TransportParseError::InsufficientData)?;
+        Ok((topic, 0, false, Bytes::from(payload_bytes)))
     }
-    let encoded = String::from_utf8(encoded_chars).map_err(|_| TransportParseError::InsufficientData)?;
-    let payload_bytes = decode_base64(&encoded).map_err(|_| TransportParseError::InsufficientData)?;
-    Ok((topic.to_string(), 0, false, Bytes::from(payload_bytes)))
 }
 
 pub fn extract_mqtt_payload(packet: &Bytes) -> Result<(String, u8, bool, Bytes), TransportParseError> {
@@ -226,10 +287,12 @@ fn read_var_byte_int(data: &[u8]) -> Result<(usize, usize), TransportParseError>
     Err(TransportParseError::MalformedRemainingLength)
 }
 
-pub fn extract_payload(packet: &Bytes, transport: crate::settings::TransportTypeEnum) -> Result<(String, u8, bool, Bytes), TransportParseError> {
+pub fn extract_payload(
+    packet: &Bytes, transport: TransportTypeEnum, server_side: bool
+) -> Result<(String, u8, bool, Bytes), TransportParseError> {
     match transport {
-        crate::settings::TransportTypeEnum::Mqtt => extract_mqtt_payload(packet),
-        crate::settings::TransportTypeEnum::Http => extract_http_payload(packet),
+        TransportTypeEnum::Mqtt => extract_mqtt_payload(packet),
+        TransportTypeEnum::Http => extract_http_payload(packet, server_side),
     }
 }
 
@@ -247,7 +310,7 @@ mod tests {
         packet_vec.push(0x00);
         packet_vec.extend_from_slice(b"hello");
         let bytes = Bytes::from(packet_vec);
-        let (topic, qos, retain, payload) = extract_mqtt_payload(&bytes).unwrap();
+        let (topic, qos, retain, payload) = extract_payload(&bytes, TransportTypeEnum::Mqtt, false).unwrap();
         assert_eq!(topic, "test");
         assert_eq!(qos, 0);
         assert!(!retain);
@@ -264,7 +327,7 @@ mod tests {
         packet_vec.push(0x00);
         packet_vec.extend_from_slice(b"data");
         let bytes = Bytes::from(packet_vec);
-        let (topic, qos, retain, payload) = extract_mqtt_payload(&bytes).unwrap();
+        let (topic, qos, retain, payload) = extract_payload(&bytes, TransportTypeEnum::Mqtt, false).unwrap();
         assert_eq!(topic, "t");
         assert_eq!(qos, 1);
         assert!(!retain);
@@ -274,14 +337,14 @@ mod tests {
     #[test]
     fn test_extract_invalid_type() {
         let packet = Bytes::from_static(&[0x40, 0x02]);
-        assert_eq!(extract_mqtt_payload(&packet).unwrap_err(), TransportParseError::InvalidPacketType(4));
+        assert_eq!(extract_payload(&packet, TransportTypeEnum::Mqtt, false).unwrap_err(), TransportParseError::InvalidPacketType(4));
     }
 
     #[test]
     fn test_create_packet_structure() {
         let topic_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let payload = Bytes::from_static(b"test_payload");
-        let packet = create_packet(&payload, topic_uuid, TransportTypeEnum::Mqtt);
+        let packet = create_packet(&payload, topic_uuid, TransportTypeEnum::Mqtt, false);
         assert_eq!(packet[0], 0x32);
         // Remaining Length: 53 -> 0x35
         assert_eq!(packet[1], 0x35);
@@ -306,8 +369,8 @@ mod tests {
     fn test_round_trip_create_and_extract() {
         let topic_uuid = Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
         let original_payload = Bytes::from(vec![0x01, 0x02, 0xFF, 0x00]);
-        let packet = create_packet(&original_payload, topic_uuid, TransportTypeEnum::Mqtt);
-        match extract_mqtt_payload(&packet) {
+        let packet = create_packet(&original_payload, topic_uuid, TransportTypeEnum::Mqtt, false);
+        match extract_payload(&packet, TransportTypeEnum::Mqtt, false) {
             Ok((parsed_topic, parsed_qos, parsed_retain, parsed_payload)) => {
                 assert_eq!(parsed_topic, topic_uuid.to_string());
                 assert_eq!(parsed_qos, 1);
@@ -322,14 +385,95 @@ mod tests {
     fn test_round_trip_empty_payload() {
         let topic_uuid = Uuid::nil();
         let empty_payload = Bytes::new();
-        let packet = create_packet(&empty_payload, topic_uuid, TransportTypeEnum::Mqtt);
-        match extract_mqtt_payload(&packet) {
+        let packet = create_packet(&empty_payload, topic_uuid, TransportTypeEnum::Mqtt, false);
+        match extract_payload(&packet, TransportTypeEnum::Mqtt, false) {
             Ok((parsed_topic, parsed_qos, _, parsed_payload)) => {
                 assert_eq!(parsed_topic, "00000000-0000-0000-0000-000000000000");
                 assert_eq!(parsed_qos, 1);
                 assert!(parsed_payload.is_empty());
             }
             Err(e) => panic!("Failed to parse empty payload packet: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_http_create_and_extract_round_trip() {
+        let topic_uuid = Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        let original_payload = Bytes::from(vec![0x01, 0x02, 0xFF, 0x00]);
+        // Client side: create a request and parse it back (request format).
+        let packet = create_packet(&original_payload, topic_uuid, TransportTypeEnum::Http, false);
+        assert!(String::from_utf8_lossy(&packet).contains("POST /image/"));
+        match extract_payload(&packet, TransportTypeEnum::Http, true) {
+            Ok((parsed_topic, parsed_qos, parsed_retain, parsed_payload)) => {
+                assert_eq!(parsed_topic, topic_uuid.to_string());
+                assert_eq!(parsed_qos, 0);
+                assert!(!parsed_retain);
+                assert_eq!(parsed_payload.as_ref(), original_payload.as_ref());
+            }
+            Err(e) => panic!("Failed to parse HTTP packet: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_http_create_packet_structure() {
+        let topic_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let payload = Bytes::from_static(b"test_payload");
+        let packet = create_packet(&payload, topic_uuid, TransportTypeEnum::Http, false);
+        let s = String::from_utf8_lossy(&packet);
+        assert!(s.starts_with("POST /image/550e8400-e29b-41d4-a716-446655440000.json HTTP/1.1\r\n"));
+        assert!(s.contains("Content-Type: application/json\r\n"));
+        assert!(s.contains(r#""img":""#));
+    }
+
+    #[test]
+    fn test_http_extract_payload_simple() {
+        let topic = "12345678-1234-5678-1234-567812345678";
+        let encoded = encode_base64(b"hello");
+        let json_body = format!(r#"{{"img":"{}"}}"#, encoded);
+        let request = format!(
+            "POST /image/{}.json HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            topic,
+            json_body.len(),
+            json_body
+        );
+        let bytes = Bytes::from(request);
+        let (parsed_topic, qos, retain, payload) = extract_payload(&bytes, TransportTypeEnum::Http, true).unwrap();
+        assert_eq!(parsed_topic, topic);
+        assert_eq!(qos, 0);
+        assert!(!retain);
+        assert_eq!(payload.as_ref(), b"hello");
+    }
+
+    #[test]
+    fn test_http_round_trip_empty_payload() {
+        let topic_uuid = Uuid::nil();
+        let empty_payload = Bytes::new();
+        let packet = create_packet(&empty_payload, topic_uuid, TransportTypeEnum::Http, false);
+        match extract_payload(&packet, TransportTypeEnum::Http, true) {
+            Ok((parsed_topic, parsed_qos, _, parsed_payload)) => {
+                assert_eq!(parsed_topic, "00000000-0000-0000-0000-000000000000");
+                assert_eq!(parsed_qos, 0);
+                assert!(parsed_payload.is_empty());
+            }
+            Err(e) => panic!("Failed to parse empty HTTP payload packet: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_http_response_create_and_extract() {
+        // Server side create (response with name+img) parsed by the client branch.
+        let topic_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let payload = Bytes::from_static(b"response_data");
+        let packet = create_packet(&payload, topic_uuid, TransportTypeEnum::Http, true);
+        let s = String::from_utf8_lossy(&packet);
+        assert!(s.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(s.contains(r#""name":""#));
+        match extract_payload(&packet, TransportTypeEnum::Http, false) {
+            Ok((parsed_topic, _, _, parsed_payload)) => {
+                assert_eq!(parsed_topic, topic_uuid.to_string());
+                assert_eq!(parsed_payload.as_ref(), payload.as_ref());
+            }
+            Err(e) => panic!("Failed to parse HTTP response packet: {:?}", e),
         }
     }
 }

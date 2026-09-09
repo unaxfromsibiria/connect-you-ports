@@ -117,12 +117,15 @@ async fn server_connection(
         }
         if transfer_in > 0 || transfer_out > 0 || transfer_error > 0 {
             update_traffic_stats(&stat_key_all, transfer_in, transfer_out, transfer_error).await;
+            (transfer_in, transfer_out, transfer_error) = (0, 0, 0);
         }
         if route_notfound_count > 0 {
             update_metric(&metric_no_route_key, route_notfound_count).await;
+            route_notfound_count = 0;
         }
         if format_error_count > 0 {
             update_metric(&metric_format_err_key, format_error_count).await;
+            format_error_count = 0;
         }
         if done {
             break;
@@ -320,6 +323,7 @@ async fn tcp_connection_processing(
 
     if in_bytes + out_bytes + error_count > 0 {
         update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
+        (in_bytes, out_bytes, error_count) = (0, 0, 0);
     }
     lost_connection(&stat_key).await;
     info!("Stopping connection handler for {} in {}", t_inf, service_name);

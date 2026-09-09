@@ -142,6 +142,8 @@ fn _read_env_socket_maps(map_str: &str, silent: bool) -> IpPortMap {
 /// Short edition of settings for client without extra tuning
 #[derive(Clone)]
 pub struct Settings {
+    /// Always false in this pure-client build; kept to mirror the main project's EncryptionData API.
+    pub is_server: bool,
     pub server_host: String,
     pub server_port: u16,
     pub buffer_size: usize,
@@ -165,12 +167,16 @@ impl Settings {
 
 pub trait EncryptionData {
     fn main_cipher_key(&self) -> String;
+    fn is_server(&self) -> bool;
     fn transport(&self) -> TransportTypeEnum;
 }
 
 impl EncryptionData for Settings {
     fn main_cipher_key(&self) -> String {
         self.cipher_key.clone()
+    }
+    fn is_server(&self) -> bool {
+        self.is_server
     }
     fn transport(&self) -> TransportTypeEnum {
         self.transport.clone()
@@ -271,6 +277,7 @@ pub fn create_settings(server_host: &str, server_port: u16, key: &str, tcp_setti
         Err(_) => TransportTypeEnum::Mqtt,
     };
     let mut settings = Settings {
+        is_server: false,
         server_host: server_host.to_string(),
         server_port,
         buffer_size: 0,
@@ -350,6 +357,7 @@ mod tests {
     #[test]
     fn test_settings_loading_params_default() {
         let settings = Settings {
+            is_server: false,
             server_host: "localhost".to_string(),
             server_port: 8080,
             buffer_size: 1024,
@@ -372,6 +380,7 @@ mod tests {
     #[test]
     fn test_settings_loading_params_extremely() {
         let settings = Settings {
+            is_server: false,
             server_host: "localhost".to_string(),
             server_port: 8080,
             buffer_size: 1024,
@@ -394,6 +403,7 @@ mod tests {
     #[test]
     fn test_reconnect_delay_saturation() {
         let settings = Settings {
+            is_server: false,
             server_host: "localhost".to_string(),
             server_port: 8080,
             buffer_size: 1024,
@@ -432,6 +442,7 @@ mod tests {
     #[test]
     fn test_encryption_data_trait() {
         let settings = Settings {
+            is_server: false,
             server_host: "localhost".to_string(),
             server_port: 8080,
             buffer_size: 1024,

@@ -65,7 +65,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var verboseLogsCheckbox: CheckBox
     private lateinit var prefs: SharedPreferences
     private lateinit var versionTextView: TextView
-    private val uiVersion = "UI v1.3"
+    private val uiVersion = "UI v1.4"
     private var lastExceptionMessage: String? = null
     private var isConnected = false
     private var rustService: RustNetworkService? = null
@@ -97,6 +97,8 @@ class MainActivity : AppCompatActivity() {
             textSize = 12f
             setTypeface(null, android.graphics.Typeface.NORMAL)
             setTextColor(android.graphics.Color.parseColor("#808080"))
+            val dp = resources.displayMetrics.density
+            setPadding(0, (24 * dp).toInt(), 0, (24 * dp).toInt())
         }
         rootLayout.addView(versionTextView)
 

@@ -372,7 +372,6 @@ async fn handle_connection(
                                                 part_uuid(&transfer_id)
                                             );
                                             stat_key = format!("{}-{}", ip_str, cfg.service_name);
-                                            add_connection(&ip_str).await;
                                             let client_in_channel = add_route(&transfer_id).await;
                                             current_transfer = Some((transfer_id, msg.service));
                                             let client_out_channel = serv_tx.clone();

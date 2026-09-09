@@ -108,6 +108,7 @@ pub struct DataHandlerSettings {
     cipher: Option<Aes256Gcm>,
     encryption: bool,
     transport: TransportTypeEnum,
+    is_server: bool,
 }
 
 pub trait DataHandler: Sized {
@@ -123,6 +124,7 @@ impl DataHandler for DataHandlerSettings {
             cipher: None,
             encryption: false,
             transport: settings.transport(),
+            is_server: settings.is_server(),
         };
         let cipher_key = settings.main_cipher_key();
         if !cipher_key.is_empty() {
@@ -177,18 +179,18 @@ impl DataHandler for DataHandlerSettings {
             data: Bytes::from(msg_data),
         };
         let payload = msg.dump();
-        create_packet(&payload, *transfer, self.transport.clone())
+        create_packet(&payload, *transfer, self.transport.clone(), self.is_server)
     }
 
     fn make_quit_message(&self, service: &Uuid, transfer: &Uuid) -> Bytes {
         let msg = DataMsg::new_quit(service);
         let payload = msg.dump();
-        create_packet(&payload, *transfer, self.transport.clone())
+        create_packet(&payload, *transfer, self.transport.clone(), self.is_server)
     }
 
     fn load_data_message(&self, data: &[u8]) -> Result<(DataMsg, Uuid), DataMessageError> {
         let packet = Bytes::from(data.to_vec());
-        let (topic_str, _, _, payload) = match extract_payload(&packet, self.transport.clone()) {
+        let (topic_str, _, _, payload) = match extract_payload(&packet, self.transport.clone(), !self.is_server) {
             Ok(v) => v,
             Err(e) => return Err(DataMessageError::Malformed(format!("MQTT parse error: {:?}", e))),
         };
@@ -248,6 +250,7 @@ mod tests {
         fn main_cipher_key(&self) -> String {
             self.key.clone()
         }
+        fn is_server(&self) -> bool { false }
         fn transport(&self) -> TransportTypeEnum { TransportTypeEnum::Mqtt }
     }
 
@@ -274,7 +277,7 @@ mod tests {
     }
 
     fn extract_msg_intest(packet: &Bytes) -> DataMsg {
-        let (_, _, _, payload) = extract_payload(packet, TransportTypeEnum::Mqtt).expect("parse packet");
+        let (_, _, _, payload) = extract_payload(packet, TransportTypeEnum::Mqtt, true).expect("parse packet");
         DataMsg::load(&payload).expect("load msg")
     }
 
