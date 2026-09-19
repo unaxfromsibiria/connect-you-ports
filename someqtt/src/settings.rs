@@ -30,6 +30,8 @@ const ENV_LOADING_LEVEL: &str = "LOADING_LEVEL";
 const ENV_ALLOW_NET: &str = "ALLOW_NET";
 const ENV_STAT_SAVE_INTERVAL: &str = "STAT_SAVE_INTERVAL";
 const ENV_TRANSPORT: &str = "TRANSPORT";
+const ENV_PEER_FRAME_ERROR_LIMIT: &str = "PEER_FRAME_ERROR_LIMIT";
+pub const DEFAULT_PEER_FRAME_ERROR_LIMIT: usize = 20;
 
 pub const DEFAULT_STAT_FILEPATH: &str = "/tmp/stat.txt";
 pub type IpPortMap = HashMap<String, HashMap<IpAddr, u16>>;
@@ -271,7 +273,8 @@ pub struct Settings {
     pub loading_level: LoadingLevelEnum,
     pub networks: Vec<IpNetwork>,
     pub client_name: Uuid,
-    pub transport: TransportTypeEnum
+    pub transport: TransportTypeEnum,
+    pub peer_frame_error_limit: usize
 }
 
 pub trait EncryptionData {
@@ -591,6 +594,7 @@ pub fn create_settings(overrides: &CliOverrides) -> Settings {
         stat_filepath,
         client_name: generate_client_name(),
         transport,
+        peer_frame_error_limit: _read_env_uint(ENV_PEER_FRAME_ERROR_LIMIT, true, DEFAULT_PEER_FRAME_ERROR_LIMIT),
     };
     if settings.buffer_size < 1024 {
         settings.buffer_size = settings.default_buffer_size();
@@ -778,6 +782,12 @@ mod tests {
             networks: Vec::new(),
             client_name: fast_name(),
             transport: TransportTypeEnum::Mqtt,
+            peer_frame_error_limit: DEFAULT_PEER_FRAME_ERROR_LIMIT,
         }
+    }
+
+    #[test]
+    fn test_default_peer_frame_error_limit() {
+        assert_eq!(default_test_settings().peer_frame_error_limit, 20);
     }
 }

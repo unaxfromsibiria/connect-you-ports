@@ -98,9 +98,32 @@ pub async fn lost_connection(service: &str) {
     }
 }
 
-pub async fn update_metric(service: &str, value: usize) {
+// Update a metric: replace the stored value (accumulate=false) or add to it.
+pub async fn update_metric(service: &str, value: usize, accumulate: bool) {
     let mut stat = GLOBAL_STAT.write().await;
-    stat.metrics.insert(service.to_string(), value);
+    match accumulate {
+        true => *stat.metrics.entry(service.to_string()).or_insert(0) += value,
+        false => { stat.metrics.insert(service.to_string(), value); }
+    }
+}
+
+// Current in-memory metric value (0 when absent).
+pub async fn get_metric(service: &str) -> usize {
+    GLOBAL_STAT.read().await.metrics.get(service).copied().unwrap_or(0)
+}
+
+// Read a metric value from the stat file (0 when absent).
+pub fn read_stat_file_value(filepath: &str, name: &str) -> usize {
+    let Ok(content) = fs::read_to_string(filepath) else { return 0; };
+    for line in content.lines() {
+        let rest = line.trim();
+        let Some(body) = rest.strip_prefix("target ") else { continue };
+        let Some((key, value)) = body.rsplit_once(" value: ") else { continue };
+        if key == name {
+            return value.trim().parse::<usize>().unwrap_or(0);
+        }
+    }
+    0
 }
 
 pub async fn update_traffic_stats(service: &str, in_bytes: usize, out_bytes: usize, errors: usize) {
@@ -133,10 +156,10 @@ pub async fn periodic_dump(filepath: &str, interval: Duration) {
     let start_time = Instant::now();
     loop {
         sleep(interval).await;
-        update_metric("uptime", (start_time.elapsed().as_secs() / 60) as usize).await;
+        update_metric("uptime", (start_time.elapsed().as_secs() / 60) as usize, false).await;
         if let Some(usage) = memory_stats::memory_stats() {
-            update_metric("physical_mem_kb", (usage.physical_mem / 1024) as usize).await;
-            update_metric("virtual_mem_kb", (usage.virtual_mem / 1024) as usize).await;
+            update_metric("physical_mem_kb", (usage.physical_mem / 1024) as usize, false).await;
+            update_metric("virtual_mem_kb", (usage.virtual_mem / 1024) as usize, false).await;
         }
         show_stats(filepath).await;
     }
@@ -228,15 +251,31 @@ mod tests {
         let value1 = 42;
         let value2 = 100;
 
-        update_metric(service, value1).await;
+        update_metric(service, value1, false).await;
         let stat = GLOBAL_STAT.read().await;
         assert_eq!(*stat.metrics.get(service).unwrap(), value1);
         drop(stat);
 
-        update_metric(service, value2).await;
+        update_metric(service, value2, false).await;
 
         let stat = GLOBAL_STAT.read().await;
         assert_eq!(*stat.metrics.get(service).unwrap(), value2);
+        drop(stat);
+
+        // accumulate=true adds to the stored value
+        update_metric(service, 7, true).await;
+        assert_eq!(get_metric(service).await, value2 + 7);
+    }
+
+    #[tokio::test]
+    async fn test_read_stat_file_value() {
+        let _g = test_guard().await;
+        let filepath = "/tmp/test_read_stat.txt";
+        fs::write(filepath, "metrics:\n  target peer-err value: 41\n  target other value: 5\n").unwrap();
+        assert_eq!(read_stat_file_value(filepath, "peer-err"), 41);
+        assert_eq!(read_stat_file_value(filepath, "other"), 5);
+        assert_eq!(read_stat_file_value(filepath, "missing"), 0);
+        let _ = fs::remove_file(filepath);
     }
 
     #[tokio::test]
@@ -245,7 +284,7 @@ mod tests {
         let service = "test_service_6";
         add_connection(service).await;
         update_traffic_stats(service, 100, 200, 1).await;
-        update_metric(service, 10).await;
+        update_metric(service, 10, false).await;
         let filepath = "/tmp/test_stats.txt";
         let _ = fs::remove_file(filepath);
         show_stats(filepath).await;
@@ -264,7 +303,7 @@ mod tests {
         let _g = test_guard().await;
         let service = "test_service_7";
         add_connection(service).await;
-        update_metric(service, 5).await;
+        update_metric(service, 5, false).await;
 
         show_stats(MEMORY_MODE).await;
 

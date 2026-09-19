@@ -135,6 +135,7 @@ fn format_traffic(in_bytes: usize, out_bytes: usize) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::runtime::Builder;
 
     #[tokio::test]
     async fn test_add_connection() {
@@ -172,12 +173,22 @@ mod tests {
 
     #[test]
     fn test_show_stats_sync_format() {
-        let output = show_stats_sync();
-        if !output.is_empty() {
-            // New table format should contain headers
-            assert!(output.contains("service"));
-            assert!(output.contains("in"));
-            assert!(output.contains("out"));
+        // Seed own data on a short-lived runtime so the table is non-empty
+        // regardless of parallel tests, then read it with no active runtime.
+        let key = "test_fmt_unique_5";
+        {
+            let rt = Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async {
+                add_connection(key).await;
+                update_traffic_stats(key, 100, 200, 1).await;
+            });
         }
+
+        let output = show_stats_sync();
+        // Table format should contain headers and the seeded service
+        assert!(output.contains("service"));
+        assert!(output.contains("in"));
+        assert!(output.contains("out"));
+        assert!(output.contains(key));
     }
 }

@@ -119,11 +119,11 @@ async fn server_connection<T: LoadingParams + Send + 'static>(
                                 (transfer_in, transfer_out, transfer_error) = (0, 0, 0);
                             }
                             if route_notfound_count > 0 {
-                                update_metric(&metric_no_route_key, route_notfound_count).await;
+                                update_metric(&metric_no_route_key, route_notfound_count, false).await;
                                 route_notfound_count = 0;
                             }
                             if format_error_count > 0 {
-                                update_metric(&metric_format_err_key, format_error_count).await;
+                                update_metric(&metric_format_err_key, format_error_count, false).await;
                                 format_error_count = 0;
                             }
                         },
@@ -141,11 +141,11 @@ async fn server_connection<T: LoadingParams + Send + 'static>(
             (transfer_in, transfer_out, transfer_error) = (0, 0, 0);
         }
         if route_notfound_count > 0 {
-            update_metric(&metric_no_route_key, route_notfound_count).await;
+            update_metric(&metric_no_route_key, route_notfound_count, false).await;
             route_notfound_count = 0;
         }
         if format_error_count > 0 {
-            update_metric(&metric_format_err_key, format_error_count).await;
+            update_metric(&metric_format_err_key, format_error_count, false).await;
             format_error_count = 0;
         }
         if done {

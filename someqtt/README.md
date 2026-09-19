@@ -28,6 +28,7 @@ Values may be given as a separate argument (`--workers 8`) or inline (`--workers
 | `CONNECTION_IDLE_LIMIT` | TCP connection idle timeout in seconds (default: 180) |
 | `CRYPTO_KEY` | cipher key in hex, AES-256-GCM requires 32 bytes; generate with `--genkey` |
 | `LOADING_LEVEL` | loading level: default, low, high, extremely (default: default) |
+| `PEER_FRAME_ERROR_LIMIT` | max peer frame read errors before the server exits and restarts; the counter persists across restarts via `STAT_FILE` (server mode; default: 20, 0 disables) |
 | `READ_BUFFER_SIZE` | read buffer size in bytes; below 1024 uses the loading-level default |
 | `SERVER` | run as server when set to on/yes/true/ok/1, otherwise runs as a client |
 | `SERVER_HOST` | listen address for the server, target host for the client (default: 0.0.0.0) |

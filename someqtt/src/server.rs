@@ -18,10 +18,39 @@ use uuid::Uuid;
 use crate::data::{DataHandler, DataHandlerSettings, DataMessageError};
 use crate::route::{exists, send_data, add_route, remove_route, set_channel_size, run_cleanup};
 use crate::settings::{code_name, part_uuid, Settings, LoadingParams, OUT_TTL, TaskResultEnum, TransportTypeEnum};
-use crate::stat::{add_connection, lost_connection, periodic_dump, update_metric, update_traffic_stats};
+use crate::stat::{add_connection, get_metric, lost_connection, periodic_dump, read_stat_file_value, show_stats, update_metric, update_traffic_stats};
 use crate::transport::forbidden_response;
 
+// Cumulative metric for peer frame read errors (server side).
+pub const PEER_FRAME_ERROR_METRIC: &str = "peer-frame-err-count";
+const PEER_ERR_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
 static SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
+
+// Watchdog: exits the process when too many peer frame errors accumulate, so a container supervisor
+// restarts the service. The baseline (max of in-memory and the stat file of a previous run) is seeded into
+// the metric so it keeps growing across restarts; new boundary = current value + configured limit.
+async fn peer_frame_error_watchdog(limit: usize, filepath: &str) {
+    let memory_value = get_metric(PEER_FRAME_ERROR_METRIC).await;
+    let file_value = read_stat_file_value(filepath, PEER_FRAME_ERROR_METRIC);
+    let baseline = std::cmp::max(memory_value, file_value);
+    if memory_value < baseline {
+        update_metric(PEER_FRAME_ERROR_METRIC, baseline, false).await;
+    }
+    let threshold = baseline.saturating_add(limit);
+    info!(
+        "Peer frame error watchdog: limit={} current={} boundary={}", limit, baseline, threshold
+    );
+    loop {
+        sleep(PEER_ERR_CHECK_INTERVAL).await;
+        let current = get_metric(PEER_FRAME_ERROR_METRIC).await;
+        if current > threshold {
+            warn!("Too many peer frame errors ({} > {}), exiting service", current, threshold);
+            show_stats(filepath).await;
+            std::process::exit(1);
+        }
+    }
+}
 
 pub fn is_running() -> bool {
     SERVER_RUNNING.load(Ordering::SeqCst)
@@ -400,7 +429,7 @@ async fn handle_connection(
                                     None => {
                                         error_count += 1;
                                         wrong_attempt += 1;
-                                        update_metric(&format!("suspicious-{}", ip_str), wrong_attempt).await;
+                                        update_metric(&format!("suspicious-{}", ip_str), wrong_attempt, false).await;
                                         warn!(
                                             "Service key {} not configured on server (from {}, transfer: {})",
                                             part_uuid(&msg.service), peer_addr, part_uuid(&transfer_id)
@@ -414,7 +443,7 @@ async fn handle_connection(
                                 // Valid MQTT structure but content cannot be decrypted.
                                 error_count += 1;
                                 wrong_attempt += 1;
-                                update_metric(&format!("suspicious-{}", ip_str), wrong_attempt).await;
+                                update_metric(&format!("suspicious-{}", ip_str), wrong_attempt, false).await;
                                 warn!("Suspicious message from {} (valid structure, undecryptable content)", peer_addr);
                                 send_forbidden = settings.transport == TransportTypeEnum::Http;
                                 break;
@@ -429,6 +458,7 @@ async fn handle_connection(
                     },
                     Some(Err(err)) => {
                         error_count += 1;
+                        update_metric(PEER_FRAME_ERROR_METRIC, 1, true).await;
                         error!("Frame read error from {}: {}", peer_addr, err);
                         send_forbidden = settings.transport == TransportTypeEnum::Http;
                         break;
@@ -612,10 +642,20 @@ pub async fn run(settings: Settings) {
     // Periodic statistics dump to file with memory/uptime metrics.
     let stat_delay = settings.stat_delay;
     let stat_filepath = settings.stat_filepath.clone();
+    let watchdog_filepath = stat_filepath.clone();
     tasks.spawn(async move {
         periodic_dump(&stat_filepath, stat_delay).await;
         TaskResultEnum::WorkerDone
     });
+
+    // Watchdog for peer frame read errors: exits the service when too many accumulate (0 disables it).
+    let err_limit = settings.peer_frame_error_limit;
+    if err_limit > 0 {
+        tasks.spawn(async move {
+            peer_frame_error_watchdog(err_limit, &watchdog_filepath).await;
+            TaskResultEnum::WorkerDone
+        });
+    }
 
     let mut count_err = 0;
     while let Some(res) = tasks.join_next().await {
@@ -677,6 +717,7 @@ mod tests {
             networks: Vec::new(),
             client_name: Uuid::new_v4(),
             transport: TransportTypeEnum::Mqtt,
+            peer_frame_error_limit: 20,
         }
     }
 
