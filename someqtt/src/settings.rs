@@ -340,7 +340,7 @@ impl LoadingParams for Settings {
         match self.loading_level {
             LoadingLevelEnum::Default => (500, 500),
             LoadingLevelEnum::High => (800, 600),
-            LoadingLevelEnum::Extremely => (1000, 800),
+            LoadingLevelEnum::Extremely => (850, 650),
             LoadingLevelEnum::Low => (400, 400),
         }
     }
@@ -349,7 +349,7 @@ impl LoadingParams for Settings {
         let ms = match self.loading_level {
             LoadingLevelEnum::Default => 100,
             LoadingLevelEnum::High => 80,
-            LoadingLevelEnum::Extremely => 80,
+            LoadingLevelEnum::Extremely => 70,
             LoadingLevelEnum::Low => 120,
         };
         Duration::from_millis(ms)
@@ -359,7 +359,7 @@ impl LoadingParams for Settings {
         let max_sec = match self.loading_level {
             LoadingLevelEnum::Default => 5,
             LoadingLevelEnum::High => 5,
-            LoadingLevelEnum::Extremely => 8,
+            LoadingLevelEnum::Extremely => 6,
             LoadingLevelEnum::Low => 5,
         };
 
@@ -383,7 +383,7 @@ impl LoadingParams for Settings {
         let (ms, long_ms) = match self.loading_level {
             LoadingLevelEnum::Default => (12, 100),
             LoadingLevelEnum::High => (10, 80),
-            LoadingLevelEnum::Extremely => (6, 80),
+            LoadingLevelEnum::Extremely => (8, 80),
             LoadingLevelEnum::Low => (15, 120),
         };
         Duration::from_millis(if final_mode {long_ms} else {ms})
@@ -393,7 +393,7 @@ impl LoadingParams for Settings {
         let ms = match self.loading_level {
             LoadingLevelEnum::Default => 1000,
             LoadingLevelEnum::High => 500,
-            LoadingLevelEnum::Extremely => 300,
+            LoadingLevelEnum::Extremely => 400,
             LoadingLevelEnum::Low => 2000,
         };
         Duration::from_millis(ms)
