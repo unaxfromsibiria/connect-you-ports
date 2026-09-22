@@ -190,9 +190,10 @@ impl DataHandler for DataHandlerSettings {
 
     fn load_data_message(&self, data: &[u8]) -> Result<(DataMsg, Uuid), DataMessageError> {
         let packet = Bytes::from(data.to_vec());
-        let (topic_str, _, _, payload) = match extract_payload(&packet, self.transport.clone(), !self.is_server) {
+        let transport_name = self.transport.to_string();
+        let (topic_str, _, _, payload) = match extract_payload(&packet, self.transport.clone(), self.is_server) {
             Ok(v) => v,
-            Err(e) => return Err(DataMessageError::Malformed(format!("MQTT parse error: {:?}", e))),
+            Err(e) => return Err(DataMessageError::Malformed(format!("{} parse error: {:?}", transport_name, e))),
         };
 
         let transfer_id = match Uuid::parse_str(&topic_str) {
