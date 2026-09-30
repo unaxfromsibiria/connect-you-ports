@@ -717,6 +717,7 @@ mod tests {
             networks: Vec::new(),
             client_name: Uuid::new_v4(),
             transport: TransportTypeEnum::Mqtt,
+            base_value: crate::settings::DEFAULT_JSON_DATA_BASE,
             peer_frame_error_limit: 20,
         }
     }

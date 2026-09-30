@@ -170,7 +170,7 @@ class MainActivity : AppCompatActivity() {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_item,
-                listOf("mqtt", "http")
+                listOf("mqtt", "http b64", "http b85")
             ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
             setSelection(0)
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
@@ -186,7 +186,7 @@ class MainActivity : AppCompatActivity() {
                                         serverPortInput.setText("1883")
                                     }
                                 }
-                                "http" -> {
+                                "http b64", "http b85" -> {
                                     if (currentPort == 1883) {
                                         serverPortInput.setText("8080")
                                     }
@@ -607,7 +607,11 @@ class MainActivity : AppCompatActivity() {
         serverHostInput.setText(host.ifBlank { "127.0.0.1" })
         serverPortInput.setText(port)
         authKeyInput.setText(key)
-        val idx = if (transport == "http") 1 else 0
+        val idx = when (transport) {
+            "http b85" -> 2
+            "http", "http b64" -> 1 // legacy "http" maps to base64
+            else -> 0
+        }
         transportSpinner.setSelection(idx)
         verboseLogsCheckbox.isChecked = verbose
     }

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use crate::settings::{IpPortMap, Settings, code_name, part_uuid};
+use crate::settings::{IpPortMap, Settings, TransportTypeEnum, code_name, part_uuid};
 use crate::stat::{MEMORY_MODE, memory_content};
 
 fn print_service_map(proto: &str, map: &IpPortMap) {
@@ -41,10 +41,16 @@ pub fn main_info(settings: &Settings) {
         print_service_map("tcp", &settings.tcp_sockets);
         print_service_map("udp", &settings.udp_sockets);
     }
+    let transport_desc = if settings.transport == TransportTypeEnum::Http {
+        format!("http b{}", settings.base_value)
+    } else {
+        "mqtt".to_string()
+    };
     println!(
-        "Loading level: {} | stat update interval: {:.1}s",
+        "Loading level: {} | stat update interval: {:.1}s | transport: {}",
         settings.loading_level,
         settings.stat_save_iter.as_secs_f64(),
+        transport_desc,
     );
 }
 
@@ -53,6 +59,7 @@ pub fn print_env_help() {
         ("ALLOW_NET", "allowed networks list, CIDR entries separated by ';' (server mode); empty means no restriction"),
         ("CONNECTION_IDLE_LIMIT", "TCP connection idle timeout in seconds (default: 180)"),
         ("CRYPTO_KEY", "cipher key in hex, AES-256-GCM requires 32 bytes; generate with --genkey"),
+        ("JSON_DATA_BASE", "base for JSON data encoding in http transport requests/responses: 64 or 85 (default: 64)"),
         ("LOADING_LEVEL", "loading level: default, low, high, extremely (default: default)"),
         ("PEER_FRAME_ERROR_LIMIT", "max peer frame read errors before the server exits and restarts (server mode; default: 20, 0 disables)"),
         ("READ_BUFFER_SIZE", "read buffer size in bytes; below 1024 uses the loading-level default"),

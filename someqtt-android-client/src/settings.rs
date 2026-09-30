@@ -54,6 +54,22 @@ impl FromStr for TransportTypeEnum {
     }
 }
 
+pub const DEFAULT_JSON_DATA_BASE: usize = 64;
+
+/// Parses the UI transport value ("mqtt", "http b64", "http b85") into transport type and data base.
+/// Unknown values fall back to mqtt with the default base, like before.
+pub fn parse_transport_value(transport_str: &str) -> (TransportTypeEnum, usize) {
+    let lowered = transport_str.to_lowercase();
+    let parts = lowered.trim().split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        [] | ["mqtt"] => (TransportTypeEnum::Mqtt, DEFAULT_JSON_DATA_BASE),
+        ["http"] => (TransportTypeEnum::Http, DEFAULT_JSON_DATA_BASE),
+        ["http", "b64"] => (TransportTypeEnum::Http, 64),
+        ["http", "b85"] => (TransportTypeEnum::Http, 85),
+        _ => (TransportTypeEnum::Mqtt, DEFAULT_JSON_DATA_BASE),
+    }
+}
+
 impl fmt::Display for LoadingLevelEnum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let txt = match self {
@@ -157,6 +173,7 @@ pub struct Settings {
     pub loading_level: LoadingLevelEnum,
     pub verbose: bool,
     pub transport: TransportTypeEnum,
+    pub base_value: usize,
 }
 
 impl Settings {
@@ -169,6 +186,7 @@ pub trait EncryptionData {
     fn main_cipher_key(&self) -> String;
     fn is_server(&self) -> bool;
     fn transport(&self) -> TransportTypeEnum;
+    fn json_data_base(&self) -> usize;
 }
 
 impl EncryptionData for Settings {
@@ -180,6 +198,9 @@ impl EncryptionData for Settings {
     }
     fn transport(&self) -> TransportTypeEnum {
         self.transport.clone()
+    }
+    fn json_data_base(&self) -> usize {
+        self.base_value
     }
 }
 
@@ -272,10 +293,7 @@ pub fn create_settings(server_host: &str, server_port: u16, key: &str, tcp_setti
     let idle_tcp_limit = Duration::from_secs(60 * 3);
     let idle_udp_limit = Duration::from_secs(60 * 2);
     let loading_level = LoadingLevelEnum::Extremely;
-    let transport = match TransportTypeEnum::from_str(transport_str) {
-        Ok(t) => t,
-        Err(_) => TransportTypeEnum::Mqtt,
-    };
+    let (transport, base_value) = parse_transport_value(transport_str);
     let mut settings = Settings {
         is_server: false,
         server_host: server_host.to_string(),
@@ -291,6 +309,7 @@ pub fn create_settings(server_host: &str, server_port: u16, key: &str, tcp_setti
         loading_level,
         verbose,
         transport,
+        base_value,
     };
     settings.buffer_size = settings.default_buffer_size();
     settings
@@ -371,6 +390,7 @@ mod tests {
             loading_level: LoadingLevelEnum::Default,
             verbose: false,
             transport: TransportTypeEnum::Mqtt,
+            base_value: DEFAULT_JSON_DATA_BASE,
         };
         assert_eq!(settings.default_buffer_size(), 4 * 1024);
         assert_eq!(settings.channel_size(), (500, 500));
@@ -394,6 +414,7 @@ mod tests {
             loading_level: LoadingLevelEnum::Extremely,
             verbose: false,
             transport: TransportTypeEnum::Mqtt,
+            base_value: DEFAULT_JSON_DATA_BASE,
         };
         assert_eq!(settings.default_buffer_size(), 8 * 1024);
         assert_eq!(settings.channel_size(), (1000, 800));
@@ -417,6 +438,7 @@ mod tests {
             loading_level: LoadingLevelEnum::Default, // max_sec = 5
             verbose: false,
             transport: TransportTypeEnum::Mqtt,
+            base_value: DEFAULT_JSON_DATA_BASE,
         };
         let delay_0 = settings.reconnect_delay(0);
         assert_eq!(delay_0.as_millis(), 1000); // min_ms
@@ -440,6 +462,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_transport_value() {
+        assert_eq!(parse_transport_value(""), (TransportTypeEnum::Mqtt, 64));
+        assert_eq!(parse_transport_value("mqtt"), (TransportTypeEnum::Mqtt, 64));
+        assert_eq!(parse_transport_value("http"), (TransportTypeEnum::Http, 64));
+        assert_eq!(parse_transport_value("http b64"), (TransportTypeEnum::Http, 64));
+        assert_eq!(parse_transport_value("HTTP B85"), (TransportTypeEnum::Http, 85));
+        assert_eq!(parse_transport_value(" http  b85 "), (TransportTypeEnum::Http, 85));
+        assert_eq!(parse_transport_value("unknown"), (TransportTypeEnum::Mqtt, 64));
+    }
+
+    #[test]
+    fn test_create_settings_transport_variants() {
+        let s = create_settings("localhost", 8080, "", "", "", false, "http b85");
+        assert_eq!(s.transport, TransportTypeEnum::Http);
+        assert_eq!(s.base_value, 85);
+        let s = create_settings("localhost", 8080, "", "", "", false, "http b64");
+        assert_eq!(s.transport, TransportTypeEnum::Http);
+        assert_eq!(s.base_value, 64);
+    }
+
+    #[test]
     fn test_encryption_data_trait() {
         let settings = Settings {
             is_server: false,
@@ -456,6 +499,7 @@ mod tests {
             loading_level: LoadingLevelEnum::Default,
             verbose: false,
             transport: TransportTypeEnum::Mqtt,
+            base_value: DEFAULT_JSON_DATA_BASE,
         };
 
         assert_eq!(settings.main_cipher_key(), "my_secret");

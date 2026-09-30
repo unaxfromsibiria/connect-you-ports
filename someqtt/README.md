@@ -27,6 +27,7 @@ Values may be given as a separate argument (`--workers 8`) or inline (`--workers
 | `ALLOW_NET` | allowed networks list, CIDR entries separated by ';' (server mode); empty means no restriction |
 | `CONNECTION_IDLE_LIMIT` | TCP connection idle timeout in seconds (default: 180) |
 | `CRYPTO_KEY` | cipher key in hex, AES-256-GCM requires 32 bytes; generate with `--genkey` |
+| `JSON_DATA_BASE` | base for JSON data encoding in http transport requests/responses: 64 or 85 (default: 64) |
 | `LOADING_LEVEL` | loading level: default, low, high, extremely (default: default) |
 | `PEER_FRAME_ERROR_LIMIT` | max peer frame read errors before the server exits and restarts; the counter persists across restarts via `STAT_FILE` (server mode; default: 20, 0 disables) |
 | `READ_BUFFER_SIZE` | read buffer size in bytes; below 1024 uses the loading-level default |

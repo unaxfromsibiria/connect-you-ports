@@ -108,6 +108,7 @@ pub struct DataHandlerSettings {
     cipher: Option<Aes256Gcm>,
     encryption: bool,
     transport: TransportTypeEnum,
+    base_value: usize,
     is_server: bool,
 }
 
@@ -124,6 +125,7 @@ impl DataHandler for DataHandlerSettings {
             cipher: None,
             encryption: false,
             transport: settings.transport(),
+            base_value: settings.json_data_base(),
             is_server: settings.is_server(),
         };
         let cipher_key = settings.main_cipher_key();
@@ -179,19 +181,19 @@ impl DataHandler for DataHandlerSettings {
             data: Bytes::from(msg_data),
         };
         let payload = msg.dump();
-        create_packet(&payload, *transfer, self.transport.clone(), self.is_server)
+        create_packet(&payload, *transfer, self.transport.clone(), self.base_value, self.is_server)
     }
 
     fn make_quit_message(&self, service: &Uuid, transfer: &Uuid) -> Bytes {
         let msg = DataMsg::new_quit(service);
         let payload = msg.dump();
-        create_packet(&payload, *transfer, self.transport.clone(), self.is_server)
+        create_packet(&payload, *transfer, self.transport.clone(), self.base_value, self.is_server)
     }
 
     fn load_data_message(&self, data: &[u8]) -> Result<(DataMsg, Uuid), DataMessageError> {
         let packet = Bytes::from(data.to_vec());
         let transport_name = self.transport.to_string();
-        let (topic_str, _, _, payload) = match extract_payload(&packet, self.transport.clone(), self.is_server) {
+        let (topic_str, _, _, payload) = match extract_payload(&packet, self.transport.clone(), self.base_value, self.is_server) {
             Ok(v) => v,
             Err(e) => return Err(DataMessageError::Malformed(format!("{} parse error: {:?}", transport_name, e))),
         };
@@ -253,6 +255,7 @@ mod tests {
         }
         fn is_server(&self) -> bool { false }
         fn transport(&self) -> TransportTypeEnum { TransportTypeEnum::Mqtt }
+        fn json_data_base(&self) -> usize { 64 }
     }
 
     const VALID_KEY: &str = "f6a5a635556a59f6eef8a65c7d146d2f138941accaa70547d27b9286b958ad7b";
@@ -278,7 +281,7 @@ mod tests {
     }
 
     fn extract_msg_intest(packet: &Bytes) -> DataMsg {
-        let (_, _, _, payload) = extract_payload(packet, TransportTypeEnum::Mqtt, true).expect("parse packet");
+        let (_, _, _, payload) = extract_payload(packet, TransportTypeEnum::Mqtt, 64, true).expect("parse packet");
         DataMsg::load(&payload).expect("load msg")
     }
 

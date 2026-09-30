@@ -18,6 +18,10 @@ The `android_ui_tpl` directory contains a minimal, functional Android project wr
 
 > **Note**: This template includes only the essential files required to demonstrate integration and functionality. It is not a full-featured production app but provides a solid foundation for customization.
 
+### Why there is no prebuilt APK?
+
+I intentionally do not distribute executable files - especially on Android as a security measure. A distributable build would be passed from hand to hand without anyone verifying checksums, and eventually someone could replace it with malware. Since this project has never published an APK in public, that risk does not exist here: you always build the app yourself from source.
+
 ## Screenshot
 
 ![Screenshot](screen_1.png)

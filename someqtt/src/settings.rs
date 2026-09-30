@@ -30,8 +30,18 @@ const ENV_LOADING_LEVEL: &str = "LOADING_LEVEL";
 const ENV_ALLOW_NET: &str = "ALLOW_NET";
 const ENV_STAT_SAVE_INTERVAL: &str = "STAT_SAVE_INTERVAL";
 const ENV_TRANSPORT: &str = "TRANSPORT";
+const ENV_JSON_DATA_BASE: &str = "JSON_DATA_BASE";
 const ENV_PEER_FRAME_ERROR_LIMIT: &str = "PEER_FRAME_ERROR_LIMIT";
 pub const DEFAULT_PEER_FRAME_ERROR_LIMIT: usize = 20;
+pub const DEFAULT_JSON_DATA_BASE: usize = 64;
+
+// Parse JSON_DATA_BASE value: only 64 or 85 are valid, anything else falls back to the default.
+fn parse_json_data_base(raw: &str) -> Option<usize> {
+    match raw.trim().parse::<usize>() {
+        Ok(val) if val == 64 || val == 85 => Some(val),
+        _ => None,
+    }
+}
 
 pub const DEFAULT_STAT_FILEPATH: &str = "/tmp/stat.txt";
 pub type IpPortMap = HashMap<String, HashMap<IpAddr, u16>>;
@@ -274,6 +284,7 @@ pub struct Settings {
     pub networks: Vec<IpNetwork>,
     pub client_name: Uuid,
     pub transport: TransportTypeEnum,
+    pub base_value: usize,
     pub peer_frame_error_limit: usize
 }
 
@@ -281,6 +292,7 @@ pub trait EncryptionData {
     fn main_cipher_key(&self) -> String;
     fn is_server(&self) -> bool;
     fn transport(&self) -> TransportTypeEnum;
+    fn json_data_base(&self) -> usize;
 }
 
 impl EncryptionData for Settings {
@@ -292,6 +304,9 @@ impl EncryptionData for Settings {
     }
     fn transport(&self) -> TransportTypeEnum {
         self.transport.clone()
+    }
+    fn json_data_base(&self) -> usize {
+        self.base_value
     }
 }
 
@@ -548,6 +563,15 @@ pub fn create_settings(overrides: &CliOverrides) -> Settings {
         Ok(val) => val,
         Err(_) => TransportTypeEnum::Mqtt,
     };
+    let base_raw = _read_env_str(ENV_JSON_DATA_BASE, true);
+    let base_value = match parse_json_data_base(&base_raw) {
+        Some(val) => val,
+        None if base_raw.trim().is_empty() => DEFAULT_JSON_DATA_BASE,
+        None => {
+            warn!("Invalid {} value '{}', expected 64 or 85; using default {}", ENV_JSON_DATA_BASE, base_raw, DEFAULT_JSON_DATA_BASE);
+            DEFAULT_JSON_DATA_BASE
+        }
+    };
     let default_port = match transport {
         TransportTypeEnum::Mqtt => 1883,
         TransportTypeEnum::Http => 8080,
@@ -594,6 +618,7 @@ pub fn create_settings(overrides: &CliOverrides) -> Settings {
         stat_filepath,
         client_name: generate_client_name(),
         transport,
+        base_value,
         peer_frame_error_limit: _read_env_uint(ENV_PEER_FRAME_ERROR_LIMIT, true, DEFAULT_PEER_FRAME_ERROR_LIMIT),
     };
     if settings.buffer_size < 1024 {
@@ -782,6 +807,7 @@ mod tests {
             networks: Vec::new(),
             client_name: fast_name(),
             transport: TransportTypeEnum::Mqtt,
+            base_value: DEFAULT_JSON_DATA_BASE,
             peer_frame_error_limit: DEFAULT_PEER_FRAME_ERROR_LIMIT,
         }
     }
@@ -789,5 +815,15 @@ mod tests {
     #[test]
     fn test_default_peer_frame_error_limit() {
         assert_eq!(default_test_settings().peer_frame_error_limit, 20);
+    }
+
+    #[test]
+    fn test_parse_json_data_base() {
+        assert_eq!(parse_json_data_base("64"), Some(64));
+        assert_eq!(parse_json_data_base("85"), Some(85));
+        assert_eq!(parse_json_data_base(" 85 "), Some(85));
+        assert_eq!(parse_json_data_base(""), None);
+        assert_eq!(parse_json_data_base("72"), None);
+        assert_eq!(parse_json_data_base("abc"), None);
     }
 }
