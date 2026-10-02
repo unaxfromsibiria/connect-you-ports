@@ -1,7 +1,9 @@
 .git
-example
+example/*
 img
 docker-compose.yml
 Makefile
 target
 example*.txt
+pm/*
+issue/*

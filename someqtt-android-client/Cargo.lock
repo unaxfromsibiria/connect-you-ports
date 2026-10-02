@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "socket_phone"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "aes-gcm",
  "android_logger",

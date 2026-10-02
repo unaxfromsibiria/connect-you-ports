@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "someqtt"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "aes-gcm",
  "base64",

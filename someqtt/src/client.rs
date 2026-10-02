@@ -19,6 +19,9 @@ use crate::route::{exists, send_data, add_route, remove_route, set_channel_size,
 use crate::settings::{LoadingParams, Settings, code_name, fast_name, part_uuid, TaskResultEnum};
 use crate::stat::{add_connection, update_metric, update_traffic_stats, lost_connection, periodic_dump};
 
+/// Warn if this many outbound messages are queued after a tunnel reconnect (diagnostic only).
+const RECONNECT_BURST_WARN_THRESHOLD: usize = 16;
+
 static CLIENT_RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub fn is_running() -> bool {
@@ -37,6 +40,7 @@ async fn server_connection<T: LoadingParams + Send + 'static>(
     service_name: String,
     connection_info: String,
     addr: String,
+    transfer: Uuid,
     data_handler: Arc<DataHandlerSettings>,
     mut to_server_channel: mpsc::Receiver<Bytes>,
 ) {
@@ -59,9 +63,23 @@ async fn server_connection<T: LoadingParams + Send + 'static>(
         match TcpStream::connect(&addr).await {
             Ok(stream) => {
                 info!("Connection for {} established", connection_info);
+                // Local side may have died during reconnect; stop if its route is gone.
+                let pending = to_server_channel.len();
+                if !exists(&transfer).await {
+                    warn!("Route gone after reconnect, stopping in {}", connection_info);
+                    done = true;
+                } else if pending > RECONNECT_BURST_WARN_THRESHOLD {
+                    warn!(
+                        "Large buffered burst after reconnect: {} messages in {}",
+                        pending, connection_info
+                    );
+                }
                 let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
                 // processing in/out
                 loop {
+                    if done {
+                        break;
+                    }
                     tokio::select! {
                         frame_opt = framed.next() => {
                             match frame_opt {
@@ -99,19 +117,29 @@ async fn server_connection<T: LoadingParams + Send + 'static>(
                                 },
                             }
                         },
-                        Some(data) = to_server_channel.recv() => {
-                            let iter_n = data.len();
-                            match framed.send(data).await {
-                                Ok(_) => {
-                                    transfer_out += iter_n;
+                        data_opt = to_server_channel.recv() => {
+                            match data_opt {
+                                Some(data) if !data.is_empty() => {
+                                    let iter_n = data.len();
+                                    match framed.send(data).await {
+                                        Ok(_) => {
+                                            transfer_out += iter_n;
+                                        },
+                                        Err(err) => {
+                                            error!("Send error {} in connection: {}", err, connection_info);
+                                            transfer_error += 1;
+                                            break;
+                                        }
+                                    }
                                 },
-                                  Err(err) => {
-                                      error!("Send error {} in connection: {}", err, connection_info);
-                                      transfer_error += 1;
-                                      break;
-                                  }
-                              }
-                          },
+                                _ => {
+                                    // Channel closed or quit marker: local side is done.
+                                    info!("Server channel closed, stopping in {}", connection_info);
+                                    done = true;
+                                    break;
+                                }
+                            }
+                        },
                         _ = sleep(update_stat_delay) => {
                             if transfer_in > 0 || transfer_out > 0 || transfer_error > 0 {
                                 update_traffic_stats(&stat_key, transfer_in, transfer_out, transfer_error).await;
@@ -229,6 +257,7 @@ async fn tcp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                         serv_name,
                         conn_info,
                         server_addr,
+                        transfer,
                         data_handler_out,
                         serv_rx,
                     ).await;
@@ -274,6 +303,8 @@ async fn tcp_connection_processing(
     add_connection(&stat_key).await;
     let t_inf = part_uuid(&transfer);
     let mut with_quit = false;
+    // Set when the local side dies unexpectedly (idle/read/send error) so we can signal server_connection.
+    let mut local_dead = false;
     let mut buf = vec![0; buffer_size];
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
@@ -288,6 +319,7 @@ async fn tcp_connection_processing(
                     Ok(n) => n,
                     Err(err) => {
                         error_count += 1;
+                        local_dead = true;
                         error!("Failed to read from client {} in {}: {}", c_addr, service_name, err);
                         break;
                     }
@@ -300,6 +332,7 @@ async fn tcp_connection_processing(
                 let data = data_handler.make_data_message(&buf[..n], &service_code, &transfer);
                 if let Err(err) = to_server_channel.send(data).await {
                     warn!("Failed to send data to server channel {} in {}: {}", t_inf, service_name, err);
+                    local_dead = true;
                     break;
                 } else {
                     with_quit = true;
@@ -324,6 +357,7 @@ async fn tcp_connection_processing(
             // Idle timeout
             _ = sleep(idle_limit) => {
                 warn!("Idle timeout for TCP connection {} client {}", t_inf, c_addr);
+                local_dead = true;
                 break;
             },
             // Periodic traffic statistics update
@@ -367,6 +401,12 @@ async fn tcp_connection_processing(
     }
     if in_bytes + out_bytes + error_count > 0 {
         update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
+    }
+    // Signal server_connection to stop reconnecting when the local side died unexpectedly.
+    if local_dead {
+        if let Err(err) = to_server_channel.send(Bytes::new()).await {
+            warn!("Failed to send quit marker to server channel {} in {}: {}", t_inf, service_name, err);
+        }
     }
     remove_route(&transfer).await;
 }
@@ -450,6 +490,7 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                                             s_name,
                                             conn_info,
                                             server_addr,
+                                            transfer,
                                             data_handler_spawn,
                                             serv_rx,
                                         ).await;
