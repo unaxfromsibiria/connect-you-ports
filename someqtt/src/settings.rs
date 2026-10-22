@@ -45,6 +45,8 @@ fn parse_json_data_base(raw: &str) -> Option<usize> {
 
 pub const DEFAULT_STAT_FILEPATH: &str = "/tmp/stat.txt";
 pub type IpPortMap = HashMap<String, HashMap<IpAddr, u16>>;
+// Target host may be an IP literal or a domain name (resolved at connect time).
+pub type HostPortMap = HashMap<String, HashMap<String, u16>>;
 pub const OUT_TTL: u32 = 96;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -197,6 +199,54 @@ fn _read_env_socket_maps(name: &str, silent: bool) -> IpPortMap {
     result
 }
 
+// Like `_read_env_socket_maps` but keeps the host as a string so domain names are accepted.
+fn _read_env_host_port_maps(name: &str, silent: bool) -> HostPortMap {
+    let map_str = match env::var(name) {
+        Ok(val) => val,
+        Err(e) => {
+            if !silent {
+                warn!("Failed to read host port map from {}: {}", name, e);
+            }
+            return HostPortMap::new()
+        },
+    };
+    _parse_host_port_map(&map_str, silent)
+}
+
+// Parse a 'service:host:port;...' string. The host may be an IP literal or a domain name.
+fn _parse_host_port_map(map_str: &str, silent: bool) -> HostPortMap {
+    let mut result = HashMap::new();
+    for entry in map_str.split(';') {
+        let parts: Vec<&str> = entry.split(':').collect();
+        if parts.len() != 3 {
+            if !silent {
+                warn!("Invalid target entry format '{}' - expected 'service:host:port'", entry);
+            }
+            continue;
+        }
+
+        let service_name = parts[0].to_string();
+        let host = parts[1].trim().to_string();
+        if host.is_empty() {
+            if !silent {
+                warn!("Empty host in target entry '{}'", entry);
+            }
+            continue;
+        }
+        let port = match parts[2].parse::<u16>() {
+            Ok(port) => port,
+            Err(e) => {
+                if !silent {
+                    warn!("Invalid port '{}' in target entry: {}", parts[2], e);
+                }
+                continue;
+            }
+        };
+        result.entry(service_name).or_insert_with(HashMap::new).insert(host, port);
+    }
+    result
+}
+
 fn _read_env_bool(name: &str, silent: bool, default: bool) -> bool {
     let bool_str = match env::var(name) {
         Ok(val) => val,
@@ -274,8 +324,8 @@ pub struct Settings {
     pub stat_filepath: String,
     pub tcp_sockets: IpPortMap,
     pub udp_sockets: IpPortMap,
-    pub tcp_targets: IpPortMap,
-    pub udp_targets: IpPortMap,
+    pub tcp_targets: HostPortMap,
+    pub udp_targets: HostPortMap,
     pub cipher_key: String,
     pub idle_tcp_limit: Duration,
     pub idle_udp_limit: Duration,
@@ -540,14 +590,14 @@ pub fn create_settings(overrides: &CliOverrides) -> Settings {
         IpPortMap::new()
     };
     let tcp_targets = if is_server {
-        _read_env_socket_maps(ENV_TCP_TARGET, false)
+        _read_env_host_port_maps(ENV_TCP_TARGET, false)
     } else {
-        IpPortMap::new()
+        HostPortMap::new()
     };
     let udp_targets = if is_server {
-        _read_env_socket_maps(ENV_UDP_TARGET, false)
+        _read_env_host_port_maps(ENV_UDP_TARGET, false)
     } else {
-        IpPortMap::new()
+        HostPortMap::new()
     };
     let idle_tcp_limit = Duration::from_secs(
         _read_env_uint(ENV_CONNECTION_IDLE, true, 60 * 3) as u64
@@ -797,8 +847,8 @@ mod tests {
             stat_filepath: String::new(),
             tcp_sockets: IpPortMap::default(),
             udp_sockets: IpPortMap::default(),
-            tcp_targets: IpPortMap::default(),
-            udp_targets: IpPortMap::default(),
+            tcp_targets: HostPortMap::default(),
+            udp_targets: HostPortMap::default(),
             cipher_key: String::new(),
             idle_tcp_limit: Duration::from_secs(0),
             idle_udp_limit: Duration::from_secs(0),
@@ -825,5 +875,31 @@ mod tests {
         assert_eq!(parse_json_data_base(""), None);
         assert_eq!(parse_json_data_base("72"), None);
         assert_eq!(parse_json_data_base("abc"), None);
+    }
+
+    #[test]
+    fn test_parse_host_port_map() {
+        // domain name host is accepted (not rejected as an invalid IP)
+        let m = _parse_host_port_map("svc:dns.web-site.com:8080", true);
+        assert_eq!(m.get("svc").and_then(|inner| inner.get("dns.web-site.com")), Some(&8080));
+
+        // IP literal still works
+        let m = _parse_host_port_map("svc:127.0.0.1:9000", true);
+        assert_eq!(m.get("svc").and_then(|inner| inner.get("127.0.0.1")), Some(&9000));
+
+        // multiple entries separated by ';'
+        let m = _parse_host_port_map("a:host-a.com:80;b:10.0.0.5:443", true);
+        assert_eq!(m.get("a").and_then(|inner| inner.get("host-a.com")), Some(&80));
+        assert_eq!(m.get("b").and_then(|inner| inner.get("10.0.0.5")), Some(&443));
+
+        // invalid entries are skipped: wrong part count, empty host, bad port
+        let m = _parse_host_port_map("bad;ok:host.com:80;svc::99;port:host.com:notaport", true);
+        assert!(m.get("bad").is_none(), "2-part entry must be skipped");
+        assert_eq!(m.get("ok").and_then(|inner| inner.get("host.com")), Some(&80));
+        assert!(m.get("svc").is_none(), "empty host must be skipped");
+        assert!(m.get("port").is_none(), "non-numeric port must be skipped");
+
+        // empty string yields an empty map
+        assert!(_parse_host_port_map("", true).is_empty());
     }
 }

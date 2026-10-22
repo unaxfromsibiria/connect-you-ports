@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{lookup_host, TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::{interval, sleep};
@@ -66,7 +66,7 @@ pub fn stop() {
 struct TargetConfig {
     service_code: Uuid,
     service_name: String,
-    ip: IpAddr,
+    host: String,
     port: u16,
     is_udp: bool,
     buffer_size: usize,
@@ -97,11 +97,11 @@ fn resolve_target(service_code: &Uuid, settings: &Settings) -> Option<TargetConf
     let any_v4: IpAddr = Ipv4Addr::UNSPECIFIED.into();
     for (name, map) in settings.tcp_targets.iter() {
         if code_name(name) == *service_code {
-            let Some((ip, port)) = map.iter().next() else { continue; };
+            let Some((host, port)) = map.iter().next() else { continue; };
             return Some(TargetConfig {
                 service_code: *service_code,
                 service_name: name.clone(),
-                ip: *ip,
+                host: host.clone(),
                 port: *port,
                 is_udp: false,
                 buffer_size,
@@ -113,11 +113,11 @@ fn resolve_target(service_code: &Uuid, settings: &Settings) -> Option<TargetConf
     }
     for (name, map) in settings.udp_targets.iter() {
         if code_name(name) == *service_code {
-            let Some((ip, port)) = map.iter().next() else { continue; };
+            let Some((host, port)) = map.iter().next() else { continue; };
             return Some(TargetConfig {
                 service_code: *service_code,
                 service_name: name.clone(),
-                ip: *ip,
+                host: host.clone(),
                 port: *port,
                 is_udp: true,
                 buffer_size,
@@ -136,8 +136,9 @@ async fn process_data_transfer_tcp(
     mut from_client_channel: mpsc::Receiver<(Uuid, Bytes)>,
     to_client_channel: mpsc::Sender<(Uuid, Uuid, Bytes)>,
 ) {
-    let serv = format!("{} ({}) - {}:{}", cfg.service_name, part_uuid(&cfg.service_code), cfg.ip, cfg.port);
-    let tcp_stream = match TcpStream::connect((cfg.ip, cfg.port)).await {
+    let serv = format!("{} ({}) - {}:{}", cfg.service_name, part_uuid(&cfg.service_code), cfg.host, cfg.port);
+    // Host may be a domain name; Rust resolves DNS via ToSocketAddrs.
+    let tcp_stream = match TcpStream::connect((cfg.host.as_str(), cfg.port)).await {
         Ok(stream) => stream,
         Err(err) => {
             error!("Failed to connect to TCP target '{}' in {}: {}", part_uuid(&transfer), serv, err);
@@ -251,9 +252,19 @@ async fn process_data_transfer_udp(
     mut from_client_channel: mpsc::Receiver<(Uuid, Bytes)>,
     to_client_channel: mpsc::Sender<(Uuid, Uuid, Bytes)>,
 ) {
-    let serv = format!("{} ({}) - {}:{}", cfg.service_name, part_uuid(&cfg.service_code), cfg.ip, cfg.port);
+    let serv = format!("{} ({}) - {}:{}", cfg.service_name, part_uuid(&cfg.service_code), cfg.host, cfg.port);
     let stat_key = format!("out-total-{}", cfg.service_name);
-    let target_addr: SocketAddr = (cfg.ip, cfg.port).into();
+    // Host may be a domain name; resolve it to a concrete address for the UDP socket.
+    let target_addr = match lookup_host((cfg.host.as_str(), cfg.port)).await {
+        Ok(mut addrs) => addrs.next(),
+        Err(_) => None,
+    };
+    let Some(target_addr) = target_addr else {
+        error!("Failed to resolve UDP target '{}' in {}", serv, part_uuid(&transfer));
+        let empty = Bytes::new();
+        let _ = to_client_channel.send((transfer, cfg.service_code, empty)).await;
+        return;
+    };
     // Bind a dedicated socket for this transfer.
     let bind_from = SocketAddr::new(cfg.udp_bind_ip, create_outbound_port(transfer));
     let socket = match UdpSocket::bind(&bind_from).await {
@@ -395,7 +406,7 @@ async fn handle_connection(
                                                 peer_addr,
                                                 cfg.service_name,
                                                 part_uuid(&cfg.service_code),
-                                                cfg.ip,
+                                                cfg.host,
                                                 cfg.port,
                                                 if cfg.is_udp {"udp"} else {"tcp"},
                                                 part_uuid(&transfer_id)
@@ -685,6 +696,7 @@ pub async fn run(settings: Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::HostPortMap;
     use once_cell::sync::Lazy;
     use std::collections::HashMap;
     use tokio::sync::Mutex;
@@ -722,8 +734,8 @@ mod tests {
         }
     }
 
-    fn add_target<I: Into<IpAddr>>(map: &mut HashMap<String, HashMap<IpAddr, u16>>, name: &str, ip: I, port: u16) {
-        map.entry(name.to_string()).or_insert_with(HashMap::new).insert(ip.into(), port);
+    fn add_target(map: &mut HostPortMap, name: &str, host: &str, port: u16) {
+        map.entry(name.to_string()).or_insert_with(HashMap::new).insert(host.to_string(), port);
     }
 
     #[tokio::test]
@@ -765,25 +777,25 @@ mod tests {
     async fn test_resolve_target_missing_or_empty() {
         let s = base_settings();
         assert!(resolve_target(&Uuid::new_v4(), &s).is_none());
-        let mut empty_map: HashMap<String, HashMap<IpAddr, u16>> = HashMap::new();
+        let mut empty_map: HostPortMap = HashMap::new();
         empty_map.insert("svc-empty".to_string(), HashMap::new());
         let mut s2 = base_settings();
         s2.tcp_targets = empty_map;
         assert!(resolve_target(&code_name("svc-empty"), &s2).is_none(), "empty inner map must be skipped");
         let mut s3 = base_settings();
-        add_target(&mut s3.udp_targets, "other", Ipv4Addr::new(10, 0, 0, 5), 80);
+        add_target(&mut s3.udp_targets, "other", "10.0.0.5", 80);
         assert!(resolve_target(&code_name("svc-empty"), &s3).is_none(), "name not in any target list");
     }
 
     #[tokio::test]
     async fn test_resolve_target_tcp_and_udp() {
         let mut s = base_settings();
-        add_target(&mut s.tcp_targets, "svc-tcp", Ipv4Addr::new(127, 0, 0, 1), 9000);
-        add_target(&mut s.udp_targets, "svc-udp", Ipv4Addr::new(127, 0, 0, 2), 9001);
+        add_target(&mut s.tcp_targets, "svc-tcp", "127.0.0.1", 9000);
+        add_target(&mut s.udp_targets, "svc-udp", "127.0.0.2", 9001);
 
         let tcp = resolve_target(&code_name("svc-tcp"), &s).expect("tcp target must resolve");
         assert_eq!(tcp.service_code, code_name("svc-tcp"));
-        assert_eq!(tcp.ip, Ipv4Addr::new(127, 0, 0, 1));
+        assert_eq!(tcp.host, "127.0.0.1");
         assert_eq!(tcp.port, 9000);
         assert!(!tcp.is_udp);
         assert_eq!(tcp.idle_limit, Duration::from_secs(180));
@@ -792,7 +804,7 @@ mod tests {
 
         let udp = resolve_target(&code_name("svc-udp"), &s).expect("udp target must resolve");
         assert_eq!(udp.service_code, code_name("svc-udp"));
-        assert_eq!(udp.ip, Ipv4Addr::new(127, 0, 0, 2));
+        assert_eq!(udp.host, "127.0.0.2");
         assert_eq!(udp.port, 9001);
         assert!(udp.is_udp);
         assert_eq!(udp.idle_limit, Duration::from_secs(120), "udp idle limit must differ from tcp");
@@ -801,8 +813,8 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_target_prefers_tcp_when_both_listed() {
         let mut s = base_settings();
-        add_target(&mut s.tcp_targets, "dup-svc", Ipv4Addr::new(127, 0, 0, 1), 9000);
-        add_target(&mut s.udp_targets, "dup-svc", Ipv4Addr::new(127, 0, 0, 2), 9001);
+        add_target(&mut s.tcp_targets, "dup-svc", "127.0.0.1", 9000);
+        add_target(&mut s.udp_targets, "dup-svc", "127.0.0.2", 9001);
         let cfg = resolve_target(&code_name("dup-svc"), &s).expect("duplicated service must resolve");
         assert!(!cfg.is_udp, "tcp targets are looked up before udp ones");
         assert_eq!(cfg.port, 9000);
