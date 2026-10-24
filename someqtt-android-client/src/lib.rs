@@ -1,4 +1,3 @@
-#[macro_use] extern crate log;
 extern crate android_logger;
 
 mod settings;
@@ -8,9 +7,10 @@ mod stat;
 mod data;
 mod client;
 
+use jni::errors::{LogContextErrorAndDefault, Result as JniResult};
 use jni::objects::{JClass, JString};
 use jni::sys::{jstring, jboolean};
-use jni::JNIEnv;
+use jni::EnvUnowned;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
@@ -91,119 +91,92 @@ fn run_tokio_server(settings: Settings) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_startServer(
-    mut _env: JNIEnv,
-    _class: JClass,
-    host_jstr: JString,
+pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_startServer<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    host_jstr: JString<'caller>,
     port_jint: i32,
-    key_jstr: JString,
-    tcp_settings_jstr: JString,
-    udp_settings_jstr: JString,
+    key_jstr: JString<'caller>,
+    tcp_settings_jstr: JString<'caller>,
+    udp_settings_jstr: JString<'caller>,
     verbose_jboolean: jboolean,
-    transport_jstr: JString,
+    transport_jstr: JString<'caller>,
 ) {
     init_android_logger();
-    let host: String = match _env.get_string(&host_jstr) {
-        Ok(s) => s.into(),
-        Err(_) => {
-            error!("Failed to get host string from Java");
-            return;
-        },
-    };
-    let key: String = match _env.get_string(&key_jstr) {
-        Ok(s) => s.into(),
-        Err(_) => {
-            error!("Failed to get key string from Java");
-            return;
-        },
-    };
-    let tcp_settings: String = match _env.get_string(&tcp_settings_jstr) {
-        Ok(s) => s.into(),
-        Err(_) => {
-            error!("Failed to get tcp settings string from Java");
-            return;
-        },
-    };
-    let udp_settings: String = match _env.get_string(&udp_settings_jstr) {
-        Ok(s) => s.into(),
-        Err(_) => {
-            error!("Failed to get udp settings string from Java");
-            return;
-        },
-    };
-    let transport: String = match _env.get_string(&transport_jstr) {
-        Ok(s) => s.into(),
-        Err(_) => {
-            error!("Failed to get transport type string from Java");
-            return;
-        },
-    };
-    let port = port_jint as u16;
-    info!("Create connection to server {}:{}", host, port);
-    let state = get_state();
-    if *state.is_running.lock().unwrap() {
-        warn!("Server is already running");
-        return;
-    }
-    // Clear previous error when starting a new session
-    {
-        let mut err_lock = state.last_error.lock().unwrap();
-        *err_lock = None;
-    }
-    let verbose = (verbose_jboolean as u8) > 0;
-    let settings = create_settings(&host, port, &key, &tcp_settings, &udp_settings, verbose, &transport);
-    if settings.verbose {
-        info!("Spawning background thread for server");
-    }
-    std::thread::spawn(move || {
-        run_tokio_server(settings);
-    });
+    env.with_env(|env| -> JniResult<()> {
+        let host = host_jstr.try_to_string(env)?;
+        let key = key_jstr.try_to_string(env)?;
+        let tcp_settings = tcp_settings_jstr.try_to_string(env)?;
+        let udp_settings = udp_settings_jstr.try_to_string(env)?;
+        let transport = transport_jstr.try_to_string(env)?;
+        let port = port_jint as u16;
+        info!("Create connection to server {}:{}", host, port);
+        let state = get_state();
+        if *state.is_running.lock().unwrap() {
+            warn!("Server is already running");
+            return Ok(());
+        }
+        // Clear previous error when starting a new session
+        {
+            let mut err_lock = state.last_error.lock().unwrap();
+            *err_lock = None;
+        }
+        let verbose = (verbose_jboolean as u8) > 0;
+        let settings = create_settings(&host, port, &key, &tcp_settings, &udp_settings, verbose, &transport);
+        if settings.verbose {
+            info!("Spawning background thread for server");
+        }
+        std::thread::spawn(move || {
+            run_tokio_server(settings);
+        });
+        Ok(())
+    }).resolve_with::<LogContextErrorAndDefault, _>(|| "in startServer".to_string());
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_stopServer(
-    _env: JNIEnv,
-    _class: JClass,
+pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_stopServer<'caller>(
+    _env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
 ) {
     let state = get_state();
     *state.is_running.lock().unwrap() = false;
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getStat(
-    _env: JNIEnv,
-    _class: JClass,
+pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getStat<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
 ) -> jstring {
     let result = show_stats_sync();
-    match _env.new_string(&result) {
-        Ok(output) => output.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    env.with_env(|env| -> JniResult<jstring> {
+        let output = env.new_string(&result)?;
+        Ok(output.into_raw())
+    }).resolve_with::<LogContextErrorAndDefault, _>(|| "in getStat".to_string())
 }
 
 // New method to get and clear the last error
 #[unsafe(no_mangle)]
-pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getLastError(
-    _env: JNIEnv,
-    _class: JClass,
+pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getLastError<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
 ) -> jstring {
     let error_msg = get_and_clear_last_error();
-    match _env.new_string(&error_msg) {
-        Ok(output) => output.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    env.with_env(|env| -> JniResult<jstring> {
+        let output = env.new_string(&error_msg)?;
+        Ok(output.into_raw())
+    }).resolve_with::<LogContextErrorAndDefault, _>(|| "in getLastError".to_string())
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getVersion(
-    _env: JNIEnv,
-    _class: JClass,
+pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getVersion<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
 ) -> jstring {
-    let info = "SoMeQTT client 0.2.6".to_string();
-    match _env.new_string(&info) {
-        Ok(output) => output.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    let info = "SoMeQTT client 0.2.8".to_string();
+    env.with_env(|env| -> JniResult<jstring> {
+        let output = env.new_string(&info)?;
+        Ok(output.into_raw())
+    }).resolve_with::<LogContextErrorAndDefault, _>(|| "in getVersion".to_string())
 }
 
 #[cfg(test)]

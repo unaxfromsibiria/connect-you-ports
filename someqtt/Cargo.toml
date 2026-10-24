@@ -1,11 +1,11 @@
 [package]
 name = "someqtt"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 
 [dependencies]
 bytes = { version = "~1.12"}
-uuid = { version = "~1.28", features = ["v4", "serde"] }
+uuid = { version = "~1.29", features = ["v4", "serde"] }
 log = { version = "~0.4", features = ["std", "serde"] }
 tokio = { version = "~1.54", features = ["full"] }
 base64 = { version = "~0.23" }
