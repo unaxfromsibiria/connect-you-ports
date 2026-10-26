@@ -137,11 +137,14 @@ async fn process_data_transfer_tcp(
     to_client_channel: mpsc::Sender<(Uuid, Uuid, Bytes)>,
 ) {
     let serv = format!("{} ({}) - {}:{}", cfg.service_name, part_uuid(&cfg.service_code), cfg.host, cfg.port);
+    let started = std::time::Instant::now();
     // Host may be a domain name; Rust resolves DNS via ToSocketAddrs.
     let tcp_stream = match TcpStream::connect((cfg.host.as_str(), cfg.port)).await {
         Ok(stream) => stream,
         Err(err) => {
             error!("Failed to connect to TCP target '{}' in {}: {}", part_uuid(&transfer), serv, err);
+            // Drop the route immediately so a client retry can spawn a fresh target connection.
+            remove_route(&transfer).await;
             return;
         }
     };
@@ -244,6 +247,13 @@ async fn process_data_transfer_tcp(
         update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
     }
     lost_connection(&conn_key).await;
+    // Quick no-traffic death hints at a target that resets connections; keep a WARN for diagnostics.
+    let lived = started.elapsed();
+    if in_bytes + out_bytes == 0 && error_count == 0 && lived < Duration::from_secs(30) {
+        warn!("Target connection for {} in {} closed quickly ({} ms, no traffic)", part_uuid(&transfer), serv, lived.as_millis());
+    }
+    // Drop the route so a client retry with the same transfer id spawns a fresh target connection.
+    remove_route(&transfer).await;
 }
 
 async fn process_data_transfer_udp(
@@ -263,6 +273,7 @@ async fn process_data_transfer_udp(
         error!("Failed to resolve UDP target '{}' in {}", serv, part_uuid(&transfer));
         let empty = Bytes::new();
         let _ = to_client_channel.send((transfer, cfg.service_code, empty)).await;
+        remove_route(&transfer).await;
         return;
     };
     // Bind a dedicated socket for this transfer.
@@ -276,6 +287,7 @@ async fn process_data_transfer_udp(
             error!("Error binding UDP socket {} for {} in {}: {}", bind_from, part_uuid(&transfer), serv, err);
             let empty = Bytes::new();
             let _ = to_client_channel.send((transfer, cfg.service_code, empty)).await;
+            remove_route(&transfer).await;
             return;
         }
     };
@@ -343,6 +355,8 @@ async fn process_data_transfer_udp(
         update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;
     }
     lost_connection(&conn_key).await;
+    // Drop the route so a client retry with the same transfer id spawns a fresh target socket.
+    remove_route(&transfer).await;
 }
 
 async fn handle_connection(
@@ -578,8 +592,10 @@ async fn handle_connection(
     }
     if send_forbidden && unknown_client {
         let packet_forbidden = forbidden_response();
-        let mut raw_stream = framed.into_inner(); 
-        raw_stream.write_all(&packet_forbidden).await.unwrap();
+        let mut raw_stream = framed.into_inner();
+        if let Err(err) = raw_stream.write_all(&packet_forbidden).await {
+            warn!("Failed to send forbidden response to {}: {}", peer_addr, err);
+        }
     }
     if in_bytes + out_bytes + error_count > 0 {
         update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;

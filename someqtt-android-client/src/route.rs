@@ -66,28 +66,35 @@ pub async fn remove_route(transfer: &Uuid) {
         rt.when.remove(transfer);
         info!("Removed route: {}", transfer);
     } else {
-        warn!("Route not found for removal: {}", transfer);
+        // Normal now: the target task and the idle close-out may both remove the same route.
+        debug!("Route not found for removal: {}", transfer);
     }
 }
 
 // Remove routes whose last data send is older than max_age.
+// Termination markers are sent after the lock is released: a full channel of a stuck receiver
+// must not block every route operation in the process while the write lock is held.
 pub async fn clear_old(max_age: Duration) {
     let mut rt = SYS_ROUTER.write().await;
     let cutoff = Utc::now() - max_age;
-    let stale: Vec<Uuid> = rt.client.keys().filter(
-        |t| rt.when.get(*t).map_or(false, |last| *last < cutoff)
-    ).copied().collect();
-
-    for t in &stale {
-        if let Some(tx) = rt.client.remove(t) {
-            if tx.send((*t, Bytes::new())).await.is_err() {
-                debug!("Failed to send termination marker for route: {}", t);
-            }
-        }
+    let stale: Vec<(Uuid, mpsc::Sender<(Uuid, Bytes)>)> = rt.client.iter().filter(
+        |(t, _)| rt.when.get(*t).map_or(false, |last| *last < cutoff)
+    ).map(
+        |(t, tx)| (*t, tx.clone())
+    ).collect();
+    for (t, _) in &stale {
+        rt.client.remove(t);
         rt.when.remove(t);
     }
-    if !stale.is_empty() {
-        warn!("Cleared {} old route(s)", stale.len());
+    drop(rt);
+    let cleared = stale.len();
+    for (t, tx) in stale {
+        if tx.send((t, Bytes::new())).await.is_err() {
+            debug!("Failed to send termination marker for route: {}", t);
+        }
+    }
+    if cleared > 0 {
+        warn!("Cleared {} old route(s)", cleared);
     }
 }
 
@@ -265,5 +272,40 @@ mod tests {
 
         cleanup_route(&transfer).await;
         reset_router().await;
+    }
+
+    #[tokio::test]
+    async fn test_clear_old_does_not_block_router_on_full_channel() {
+        let _g = test_guard().await;
+        reset_router().await;
+        set_channel_size(1).await;
+        let transfer = Uuid::new_v4();
+        // A live receiver that never consumes: simulates a stuck target connection.
+        let rx = add_route(&transfer).await;
+        assert!(send_data(&transfer, &Bytes::from("fill")).await);
+
+        let clear_task = tokio::spawn(async move {
+            clear_old(Duration::from_secs(1)).await;
+        });
+        // Give the cleanup task time to reach the blocking marker send.
+        sleep(Duration::from_millis(100)).await;
+        // The router must remain usable while a marker send is pending on a full channel.
+        let router_usable = timeout(
+            Duration::from_millis(500),
+            async {
+                let other = Uuid::new_v4();
+                assert!(!exists(&other).await);
+                let _rx2 = add_route(&other).await;
+                assert!(exists(&other).await);
+                cleanup_route(&other).await;
+            }
+        ).await;
+        assert!(router_usable.is_ok(), "router was blocked while clear_old sent a marker on a full channel");
+        drop(rx); // unblock the pending send so the task can finish
+        let joined = timeout(
+            Duration::from_secs(1),
+            clear_task
+        ).await.expect("clear_old did not finish");
+        joined.unwrap();
     }
 }
