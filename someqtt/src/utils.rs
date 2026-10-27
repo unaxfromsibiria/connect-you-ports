@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use crate::settings::{IpPortMap, Settings, TransportTypeEnum, code_name, part_uuid};
+use crate::settings::{IpPortMap, Settings, TransportTypeEnum, code_name, part_uuid, SESSION_KEY_LEN};
 use crate::stat::{MEMORY_MODE, memory_content};
 
 fn print_service_map(proto: &str, map: &IpPortMap) {
@@ -55,28 +55,28 @@ pub fn main_info(settings: &Settings) {
 }
 
 pub fn print_env_help() {
-    let envs = [
-        ("ALLOW_NET", "allowed networks list, CIDR entries separated by ';' (server mode); empty means no restriction"),
-        ("CONNECTION_IDLE_LIMIT", "TCP connection idle timeout in seconds (default: 180)"),
-        ("CRYPTO_KEY", "cipher key in hex, AES-256-GCM requires 32 bytes; generate with --genkey"),
-        ("JSON_DATA_BASE", "base for JSON data encoding in http transport requests/responses: 64 or 85 (default: 64)"),
-        ("LOADING_LEVEL", "loading level: default, low, high, extremely (default: default)"),
-        ("PEER_FRAME_ERROR_LIMIT", "max peer frame read errors before the server exits and restarts (server mode; default: 20, 0 disables)"),
-        ("READ_BUFFER_SIZE", "read buffer size in bytes; below 1024 uses the loading-level default"),
-        ("SERVER", "run as server when set to on/yes/true/ok/1, otherwise runs as a client"),
-        ("SERVER_HOST", "listen address for the server, target host for the client (default: 0.0.0.0)"),
-        ("SERVER_PORT", "server port (default: 1883 or 8080)"),
-        ("SERVER_TCP_TARGET", "TCP targets map 'name:ip:port;...' on the server side"),
-        ("SERVER_UDP_TARGET", "UDP targets map 'name:ip:port;...' on the server side"),
-        ("STAT_FILE", "statistics file path (default: /tmp/stat.txt); use 'memory' to keep stats in process memory instead of a file"),
-        ("STAT_SAVE_INTERVAL", "stats save interval in seconds (server default: 2, client default: 1)"),
-        ("STAT_SHOW_INTERVAL", "stats display interval in seconds (default: 180)"),
-        ("TCP_SOCKETS", "local TCP sockets map 'name:ip:port;...' forwarded through the tunnel (client side)"),
-        ("TRANSPORT", "transport type: mqtt or http (default: mqtt)"),
-        ("UDP_BIND_FROM", "source address for outbound UDP on the server side (default: 0.0.0.0:0)"),
-        ("UDP_CONNECTION_IDLE_LIMIT", "UDP idle timeout in seconds (default: 120)"),
-        ("UDP_SOCKETS", "local UDP sockets map 'name:ip:port;...' forwarded through the tunnel (client side)"),
-        ("WORKERS", "tokio worker threads; 0 or unset means auto-detect CPU cores"),
+    let envs: Vec<(&str, String)> = vec![
+        ("ALLOW_NET", "allowed networks list, CIDR entries separated by ';' (server mode); empty means no restriction".to_string()),
+        ("CONNECTION_IDLE_LIMIT", "TCP connection idle timeout in seconds (default: 180)".to_string()),
+        ("CRYPTO_KEY", format!("cipher key in hex, AES-256-GCM requires {} bytes; generate with --genkey", SESSION_KEY_LEN)),
+        ("JSON_DATA_BASE", "base for JSON data encoding in http transport requests/responses: 64 or 85 (default: 64)".to_string()),
+        ("LOADING_LEVEL", "loading level: default, low, high, extremely (default: default)".to_string()),
+        ("PEER_FRAME_ERROR_LIMIT", "max peer frame read errors before the server exits and restarts (server mode; default: 20, 0 disables)".to_string()),
+        ("READ_BUFFER_SIZE", "read buffer size in bytes; below 1024 uses the loading-level default".to_string()),
+        ("SERVER", "run as server when set to on/yes/true/ok/1, otherwise runs as a client".to_string()),
+        ("SERVER_HOST", "listen address for the server, target host for the client (default: 0.0.0.0)".to_string()),
+        ("SERVER_PORT", "server port (default: 1883 or 8080)".to_string()),
+        ("SERVER_TCP_TARGET", "TCP targets map 'name:ip:port;...' on the server side".to_string()),
+        ("SERVER_UDP_TARGET", "UDP targets map 'name:ip:port;...' on the server side".to_string()),
+        ("STAT_FILE", "statistics file path (default: /tmp/stat.txt); use 'memory' to keep stats in process memory instead of a file".to_string()),
+        ("STAT_SAVE_INTERVAL", "stats save interval in seconds (server default: 2, client default: 1)".to_string()),
+        ("STAT_SHOW_INTERVAL", "stats display interval in seconds (default: 180)".to_string()),
+        ("TCP_SOCKETS", "local TCP sockets map 'name:ip:port;...' forwarded through the tunnel (client side)".to_string()),
+        ("TRANSPORT", "transport type: mqtt or http (default: mqtt)".to_string()),
+        ("UDP_BIND_FROM", "source address for outbound UDP on the server side (default: 0.0.0.0:0)".to_string()),
+        ("UDP_CONNECTION_IDLE_LIMIT", "UDP idle timeout in seconds (default: 120)".to_string()),
+        ("UDP_SOCKETS", "local UDP sockets map 'name:ip:port;...' forwarded through the tunnel (client side)".to_string()),
+        ("WORKERS", "tokio worker threads; 0 or unset means auto-detect CPU cores".to_string()),
     ];
     println!("Environment variables (alphabetical):");
     for (var, desc) in envs {
@@ -97,7 +97,7 @@ pub fn print_usage(bin_name: &str) {
     println!("Options:");
     println!("  --server           run as server (without this flag the app runs as a client)");
     println!("  --workers <N>      tokio worker threads; 0 or unset means auto-detect CPU cores");
-    println!("  --genkey [N]       generate a random cipher key of N bytes in hex and exit (default: 32, AES-256)");
+    println!("  --genkey [N]       generate a random cipher key of N bytes in hex and exit (default: {}, AES-256)", SESSION_KEY_LEN);
     println!("  --stat             read statistics (file STAT_FILE, default /tmp/stat.txt; 'memory' reads the in-process buffer) and print it as a table");
     println!("  -h, --help         print this help message and exit");
     println!();

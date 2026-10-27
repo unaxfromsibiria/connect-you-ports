@@ -172,7 +172,7 @@ pub extern "C" fn Java_com_example_connectports_MainActivity_00024Companion_getV
     mut env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
 ) -> jstring {
-    let info = "SoMeQTT client 0.2.9".to_string();
+    let info = "SoMeQTT client 0.3.0".to_string();
     env.with_env(|env| -> JniResult<jstring> {
         let output = env.new_string(&info)?;
         Ok(output.into_raw())

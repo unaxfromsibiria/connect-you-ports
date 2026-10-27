@@ -55,6 +55,10 @@ impl FromStr for TransportTypeEnum {
 }
 
 pub const DEFAULT_JSON_DATA_BASE: usize = 64;
+pub const SESSION_KEY_LEN: usize = 32;
+pub const SESSION_KEY_HALF_LEN: usize = SESSION_KEY_LEN / 2;
+pub const HANDSHAKE_PAYLOAD_LEN: usize = 256;
+pub const HANDSHAKE_SERVICE_TAIL_LEN: usize = 8;
 
 /// Parses the UI transport value ("mqtt", "http b64", "http b85") into transport type and data base.
 /// Unknown values fall back to mqtt with the default base, like before.

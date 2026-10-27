@@ -17,8 +17,12 @@ use uuid::Uuid;
 
 use crate::data::{DataHandler, DataHandlerSettings, DataMessageError};
 use crate::route::{exists, send_data, add_route, remove_route, set_channel_size, run_cleanup};
-use crate::settings::{code_name, part_uuid, Settings, LoadingParams, OUT_TTL, TaskResultEnum, TransportTypeEnum};
-use crate::stat::{add_connection, get_metric, lost_connection, periodic_dump, read_stat_file_value, show_stats, update_metric, update_traffic_stats};
+use crate::settings::{
+    code_name, part_uuid, Settings, LoadingParams, OUT_TTL, TaskResultEnum, TransportTypeEnum, SESSION_KEY_HALF_LEN, SESSION_KEY_LEN
+};
+use crate::stat::{
+    add_connection, get_metric, lost_connection, periodic_dump, read_stat_file_value, show_stats, update_metric, update_traffic_stats
+};
 use crate::transport::forbidden_response;
 
 // Cumulative metric for peer frame read errors (server side).
@@ -359,6 +363,45 @@ async fn process_data_transfer_udp(
     remove_route(&transfer).await;
 }
 
+enum HandshakeError {
+    NotHandshake,
+    Other(String),
+}
+
+async fn send_forbidden_response(framed: Framed<TcpStream, LengthDelimitedCodec>, peer_addr: std::net::SocketAddr) {
+    let packet = forbidden_response();
+    let mut raw_stream = framed.into_inner();
+    if let Err(err) = raw_stream.write_all(&packet).await {
+        warn!("Failed to send forbidden response to {}: {}", peer_addr, err);
+    }
+}
+
+async fn process_server_handshake(
+    framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
+    data_handler: &DataHandlerSettings,
+) -> Result<DataHandlerSettings, HandshakeError> {
+    let Some(frame_result) = framed.next().await else {
+        return Err(HandshakeError::Other("connection closed during handshake".to_string()));
+    };
+    let frame = frame_result.map_err(|err| HandshakeError::Other(format!("handshake read failed: {}", err)))?;
+    let (msg, transfer_id) = data_handler.load_data_message(frame.as_ref()).map_err(
+        |err| HandshakeError::Other(format!("handshake decrypt failed: {}", err))
+    )?;
+    let client_half = DataHandlerSettings::extract_session_key_half(&msg).ok_or(
+        HandshakeError::NotHandshake
+    )?;
+    let server_half = DataHandlerSettings::random_key_half();
+    let mut session_key = [0u8; SESSION_KEY_LEN];
+    session_key[..SESSION_KEY_HALF_LEN].copy_from_slice(&client_half);
+    session_key[SESSION_KEY_HALF_LEN..].copy_from_slice(&server_half);
+    let service = Uuid::nil();
+    let packet = data_handler.make_session_key_message(&server_half, &service, &transfer_id);
+    if let Err(err) = framed.send(packet).await {
+        return Err(HandshakeError::Other(format!("handshake send failed: {}", err)));
+    }
+    Ok(data_handler.with_session_key(&session_key))
+}
+
 async fn handle_connection(
     stream: TcpStream,
     peer_addr: std::net::SocketAddr,
@@ -383,6 +426,36 @@ async fn handle_connection(
     let (server_channel_size, service_out_channel_size) = settings.channel_size();
     set_channel_size(service_out_channel_size).await;
     let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+    let session_handler = if data_handler.encryption_enabled() {
+        match process_server_handshake(&mut framed, &data_handler).await {
+            Ok(handler) => Some(Arc::new(handler)),
+            Err(HandshakeError::NotHandshake) => {
+                warn!("Security: first packet from {} is not a session handshake", peer_addr);
+                update_metric(&format!("wrong-handshake-{}", ip_str), 1, false).await;
+                update_metric(&format!("suspicious-{}", ip_str), 1, false).await;
+                if settings.transport == TransportTypeEnum::Http {
+                    send_forbidden_response(framed, peer_addr).await;
+                }
+                lost_connection(&ip_str).await;
+                return;
+            }
+            Err(HandshakeError::Other(err)) => {
+                warn!("Security: invalid session handshake from {}: {}", peer_addr, err);
+                update_metric(&format!("suspicious-{}", ip_str), 1, false).await;
+                if settings.transport == TransportTypeEnum::Http {
+                    send_forbidden_response(framed, peer_addr).await;
+                }
+                lost_connection(&ip_str).await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let active_handler: &DataHandlerSettings = match &session_handler {
+        Some(handler) => handler.as_ref(),
+        None => data_handler.as_ref(),
+    };
     let (serv_tx, mut serv_rx) = mpsc::channel(server_channel_size);
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
     // Transfer ids observed on this connection (used for post-loop quit notification).
@@ -409,7 +482,7 @@ async fn handle_connection(
                             continue
                         }
                         in_bytes += iter_in_bytes;
-                        match data_handler.load_data_message(bytes_slice) {
+                        match active_handler.load_data_message(bytes_slice) {
                             Ok((msg, transfer_id)) => {
                                 match resolve_target(&msg.service, settings) {
                                     Some(cfg) => {
@@ -498,9 +571,9 @@ async fn handle_connection(
                 // Once send_dead, skip socket writes (peer unreachable) but keep consuming queue for the drain.
                 if !send_dead {
                     let packet = if out_data.is_empty() {
-                        data_handler.make_quit_message(&service, &out_transfer)
+                        active_handler.make_quit_message(&service, &out_transfer)
                     } else {
-                        data_handler.make_data_message(out_data.as_ref(), &service, &out_transfer)
+                        active_handler.make_data_message(out_data.as_ref(), &service, &out_transfer)
                     };
                     out_bytes += packet.len();
                     match framed.send(packet).await {
@@ -571,7 +644,7 @@ async fn handle_connection(
     if let Some((transfer, service)) = broke_on_idle.then(|| current_transfer).flatten() {
         warn!("Idle close-out for {} transfer={}", peer_addr, part_uuid(&transfer));
         if !send_dead {
-            let packet = data_handler.make_quit_message(&service, &transfer);
+            let packet = active_handler.make_quit_message(&service, &transfer);
             out_bytes += packet.len();
             match framed.send(packet).await {
                 Ok(_) => {},
@@ -591,11 +664,7 @@ async fn handle_connection(
         remove_route(&transfer).await;
     }
     if send_forbidden && unknown_client {
-        let packet_forbidden = forbidden_response();
-        let mut raw_stream = framed.into_inner();
-        if let Err(err) = raw_stream.write_all(&packet_forbidden).await {
-            warn!("Failed to send forbidden response to {}: {}", peer_addr, err);
-        }
+        send_forbidden_response(framed, peer_addr).await;
     }
     if in_bytes + out_bytes + error_count > 0 {
         update_traffic_stats(&stat_key, in_bytes, out_bytes, error_count).await;

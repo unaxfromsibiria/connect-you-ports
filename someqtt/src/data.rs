@@ -2,10 +2,12 @@ use aes_gcm::{aead::{Aead, Generate, Key, KeyInit}, Aes256Gcm, Nonce};
 use bytes::{Bytes, BytesMut, BufMut};
 use hex::decode;
 use log::{error, info};
+use rand::Rng;
 use std::fmt;
+use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::settings::{EncryptionData, TransportTypeEnum};
+use crate::settings::{EncryptionData, TransportTypeEnum, HANDSHAKE_PAYLOAD_LEN, HANDSHAKE_SERVICE_TAIL_LEN, SESSION_KEY_HALF_LEN, SESSION_KEY_LEN};
 use crate::transport::{create_packet, extract_payload};
 
 #[derive(Debug, PartialEq)]
@@ -110,6 +112,62 @@ pub struct DataHandlerSettings {
     transport: TransportTypeEnum,
     base_value: usize,
     is_server: bool,
+}
+
+impl DataHandlerSettings {
+    pub fn encryption_enabled(&self) -> bool {
+        self.encryption
+    }
+
+    pub fn with_session_key(&self, session_key: &[u8; SESSION_KEY_LEN]) -> Self {
+        let key = Key::<Aes256Gcm>::try_from(session_key.as_slice())
+            .expect("session key has valid AES-256 length");
+        let mut handler = self.clone();
+        handler.cipher = Some(Aes256Gcm::new(&key));
+        handler.encryption = true;
+        handler
+    }
+
+    pub fn random_key_half() -> [u8; SESSION_KEY_HALF_LEN] {
+        let mut half = [0u8; SESSION_KEY_HALF_LEN];
+        let mut rng = rand::rng();
+        rng.fill_bytes(&mut half);
+        half
+    }
+
+    pub fn make_session_key_message(
+        &self,
+        key_half: &[u8; SESSION_KEY_HALF_LEN],
+        service: &Uuid,
+        transfer: &Uuid,
+    ) -> Bytes {
+        let mut payload = Vec::with_capacity(HANDSHAKE_PAYLOAD_LEN);
+        payload.extend_from_slice(key_half);
+        let mut padding = vec![0u8; HANDSHAKE_PAYLOAD_LEN - SESSION_KEY_HALF_LEN];
+        let mut rng = rand::rng();
+        rng.fill_bytes(&mut padding);
+        payload.extend_from_slice(&padding);
+        // Bind the payload to the message service field to reject forged handshake plaintexts.
+        let service_bytes = service.as_bytes();
+        payload[HANDSHAKE_PAYLOAD_LEN - HANDSHAKE_SERVICE_TAIL_LEN..]
+            .copy_from_slice(&service_bytes[16 - HANDSHAKE_SERVICE_TAIL_LEN..]);
+        self.make_data_message(&payload, service, transfer)
+    }
+
+    pub fn extract_session_key_half(msg: &DataMsg) -> Option<[u8; SESSION_KEY_HALF_LEN]> {
+        if msg.data.len() != HANDSHAKE_PAYLOAD_LEN {
+            return None;
+        }
+        let service_bytes = msg.service.as_bytes();
+        let expected_tail = &service_bytes[16 - HANDSHAKE_SERVICE_TAIL_LEN..];
+        let actual_tail = &msg.data[HANDSHAKE_PAYLOAD_LEN - HANDSHAKE_SERVICE_TAIL_LEN..];
+        if actual_tail != expected_tail {
+            return None;
+        }
+        let mut half = [0u8; SESSION_KEY_HALF_LEN];
+        half.copy_from_slice(&msg.data[..SESSION_KEY_HALF_LEN]);
+        Some(half)
+    }
 }
 
 pub trait DataHandler: Sized {
@@ -237,6 +295,51 @@ impl DataHandler for DataHandlerSettings {
         }
 
         Ok((msg, transfer_id))
+    }
+}
+
+#[derive(Clone)]
+pub struct ConnHandlerSlot {
+    inner: Arc<tokio::sync::RwLock<SlotState>>,
+}
+
+struct SlotState {
+    generation: u64,
+    handler: Option<Arc<DataHandlerSettings>>,
+}
+
+impl Default for ConnHandlerSlot {
+    fn default() -> Self {
+        let state = SlotState {
+            generation: 0,
+            handler: None,
+        };
+        Self {
+            inner: Arc::new(tokio::sync::RwLock::new(state))
+        }
+    }
+}
+
+impl ConnHandlerSlot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn set(&self, handler: Arc<DataHandlerSettings>) {
+        let mut state = self.inner.write().await;
+        state.generation = state.generation.saturating_add(1);
+        state.handler = Some(handler);
+    }
+
+    pub async fn invalidate(&self) {
+        let mut state = self.inner.write().await;
+        state.generation = state.generation.saturating_add(1);
+        state.handler = None;
+    }
+
+    pub async fn get(&self) -> (u64, Option<Arc<DataHandlerSettings>>) {
+        let state = self.inner.read().await;
+        (state.generation, state.handler.clone())
     }
 }
 
@@ -585,5 +688,125 @@ mod tests {
         let loaded_msg = DataMsg::load(&dumped_bytes).expect("Failed to load message");
         // Verify that the loaded message is a quit message
         assert!(loaded_msg.is_quit());
+    }
+
+    #[test]
+    fn test_session_key_message_roundtrip() {
+        let settings = TestEncryptionData { key: VALID_KEY.to_string() };
+        let handler = DataHandlerSettings::new(&settings);
+        let service = get_uuid();
+        let transfer = get_uuid();
+        let client_half = DataHandlerSettings::random_key_half();
+        let packet = handler.make_session_key_message(&client_half, &service, &transfer);
+        let (msg, loaded_transfer) = handler.load_data_message(&packet).expect("load handshake");
+        assert_eq!(loaded_transfer, transfer);
+        assert_eq!(msg.data.len(), HANDSHAKE_PAYLOAD_LEN);
+        assert_eq!(DataHandlerSettings::extract_session_key_half(&msg), Some(client_half));
+    }
+
+    #[test]
+    fn test_session_handler_pair_encrypt_decrypt() {
+        let main = DataHandlerSettings::new(&TestEncryptionData { key: VALID_KEY.to_string() });
+        let client_half = DataHandlerSettings::random_key_half();
+        let server_half = DataHandlerSettings::random_key_half();
+        let mut session_key = [0u8; SESSION_KEY_LEN];
+        session_key[..SESSION_KEY_HALF_LEN].copy_from_slice(&client_half);
+        session_key[SESSION_KEY_HALF_LEN..].copy_from_slice(&server_half);
+
+        let client_handler = main.with_session_key(&session_key);
+        let server_handler = main.with_session_key(&session_key);
+        let data = b"session secret".to_vec();
+        let service = get_uuid();
+        let transfer = get_uuid();
+
+        let packet = client_handler.make_data_message(&data, &service, &transfer);
+        let (msg, loaded_transfer) = server_handler.load_data_message(&packet).expect("server decrypt");
+        assert_eq!(msg.data, data);
+        assert_eq!(loaded_transfer, transfer);
+
+        let reply = server_handler.make_data_message(&data, &service, &transfer);
+        let (reply_msg, _) = client_handler.load_data_message(&reply).expect("client decrypt");
+        assert_eq!(reply_msg.data, data);
+    }
+
+    #[test]
+    fn test_main_and_session_keys_do_not_interoperate() {
+        let main = DataHandlerSettings::new(&TestEncryptionData { key: VALID_KEY.to_string() });
+        let session_key = [7u8; SESSION_KEY_LEN];
+        let session = main.with_session_key(&session_key);
+        let data = b"cross key".to_vec();
+        let service = get_uuid();
+        let transfer = get_uuid();
+
+        let main_packet = main.make_data_message(&data, &service, &transfer);
+        match session.load_data_message(&main_packet) {
+            Err(DataMessageError::BadPayload) => {},
+            other => panic!("expected BadPayload for main-key packet in session handler, got {:?}", other),
+        }
+
+        let session_packet = session.make_data_message(&data, &service, &transfer);
+        match main.load_data_message(&session_packet) {
+            Err(DataMessageError::BadPayload) => {},
+            other => panic!("expected BadPayload for session-key packet in main handler, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_session_key_half_rejects_wrong_length_or_tail() {
+        let service = Uuid::new_v4();
+
+        let short_msg = DataMsg {
+            service,
+            nonce: Vec::new(),
+            data: Bytes::from(vec![0u8; HANDSHAKE_PAYLOAD_LEN - 1]),
+        };
+        assert!(DataHandlerSettings::extract_session_key_half(&short_msg).is_none());
+
+        let long_data = vec![0u8; HANDSHAKE_PAYLOAD_LEN + 1];
+        let long_msg = DataMsg {
+            service,
+            nonce: Vec::new(),
+            data: Bytes::from(long_data),
+        };
+        assert!(DataHandlerSettings::extract_session_key_half(&long_msg).is_none());
+
+        let mut valid_data = vec![1u8; HANDSHAKE_PAYLOAD_LEN];
+        valid_data[HANDSHAKE_PAYLOAD_LEN - HANDSHAKE_SERVICE_TAIL_LEN..]
+            .copy_from_slice(&service.as_bytes()[16 - HANDSHAKE_SERVICE_TAIL_LEN..]);
+        let valid_msg = DataMsg {
+            service,
+            nonce: Vec::new(),
+            data: Bytes::from(valid_data),
+        };
+        let half = DataHandlerSettings::extract_session_key_half(&valid_msg).expect("valid handshake message");
+        assert_eq!(half, [1u8; SESSION_KEY_HALF_LEN]);
+
+        let mut bad_tail_data = valid_msg.data.to_vec();
+        bad_tail_data[HANDSHAKE_PAYLOAD_LEN - 1] ^= 0xff;
+        let bad_tail_msg = DataMsg {
+            service,
+            nonce: Vec::new(),
+            data: Bytes::from(bad_tail_data),
+        };
+        assert!(DataHandlerSettings::extract_session_key_half(&bad_tail_msg).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_conn_handler_slot_set_invalidate() {
+        let slot = ConnHandlerSlot::new();
+        let (gen0, handler0) = slot.get().await;
+        assert_eq!(gen0, 0);
+        assert!(handler0.is_none());
+
+        let handler = DataHandlerSettings::new(&TestEncryptionData { key: VALID_KEY.to_string() });
+        slot.set(Arc::new(handler)).await;
+        let (gen1, handler1) = slot.get().await;
+        assert_eq!(gen1, 1);
+        assert!(handler1.is_some());
+
+        slot.invalidate().await;
+        let (gen2, handler2) = slot.get().await;
+        assert_eq!(gen2, 2);
+        assert!(handler2.is_none());
     }
 }

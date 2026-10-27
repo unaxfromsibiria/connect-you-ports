@@ -14,9 +14,9 @@ use tokio::time::{interval, sleep};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use uuid::Uuid;
 
-use crate::data::{DataHandler, DataHandlerSettings};
+use crate::data::{DataHandler, DataHandlerSettings, ConnHandlerSlot};
 use crate::route::{exists, send_data, add_route, remove_route, set_channel_size, run_cleanup};
-use crate::settings::{LoadingParams, Settings, code_name, fast_name, part_uuid, TaskResultEnum};
+use crate::settings::{LoadingParams, Settings, code_name, fast_name, part_uuid, TaskResultEnum, SESSION_KEY_HALF_LEN, SESSION_KEY_LEN};
 use crate::stat::{add_connection, update_metric, update_traffic_stats, lost_connection, periodic_dump};
 
 /// Warn if this many outbound messages are queued after a tunnel reconnect (diagnostic only).
@@ -35,6 +35,89 @@ pub fn stop() {
     }
 }
 
+const HANDSHAKE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct SessionCache {
+    generation: u64,
+    handler: Arc<DataHandlerSettings>,
+}
+
+async fn resolve_session_handler(
+    slot: &ConnHandlerSlot,
+    main: &Arc<DataHandlerSettings>,
+    cache: &mut Option<SessionCache>,
+) -> Arc<DataHandlerSettings> {
+    if !main.encryption_enabled() {
+        return main.clone();
+    }
+    let deadline = tokio::time::Instant::now() + HANDSHAKE_WAIT_TIMEOUT;
+    loop {
+        let (generation, handler_opt) = slot.get().await;
+        if let Some(handler) = handler_opt {
+            let needs_update = match cache {
+                Some(cached) => cached.generation != generation,
+                None => true,
+            };
+            if needs_update {
+                *cache = Some(SessionCache { generation, handler: handler.clone() });
+            }
+            return cache.as_ref().expect("session handler cached").handler.clone();
+        }
+        if tokio::time::Instant::now() >= deadline {
+            warn!("Session handler not ready, falling back to main key");
+            return main.clone();
+        }
+        sleep(Duration::from_millis(2)).await;
+    }
+}
+
+async fn try_get_slot_handler(
+    slot: &ConnHandlerSlot,
+    main: &Arc<DataHandlerSettings>,
+    timeout: Duration,
+) -> Option<Arc<DataHandlerSettings>> {
+    if !main.encryption_enabled() {
+        return Some(main.clone());
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(handler) = slot.get().await.1 {
+            return Some(handler);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        sleep(Duration::from_millis(2)).await;
+    }
+}
+
+async fn process_handshake(
+    framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
+    data_handler: &DataHandlerSettings,
+    transfer: &Uuid,
+) -> Result<DataHandlerSettings, String> {
+    let client_half = DataHandlerSettings::random_key_half();
+    let service = Uuid::nil();
+    let packet = data_handler.make_session_key_message(&client_half, &service, transfer);
+    if let Err(err) = framed.send(packet).await {
+        return Err(format!("handshake send failed: {}", err));
+    }
+    let Some(frame_result) = framed.next().await else {
+        return Err("connection closed during handshake".to_string());
+    };
+    let frame = frame_result.map_err(|err| format!("handshake read failed: {}", err))?;
+    let (msg, _) = data_handler.load_data_message(frame.as_ref()).map_err(
+        |err| format!("handshake decrypt failed: {}", err)
+    )?;
+    let server_half = DataHandlerSettings::extract_session_key_half(&msg).ok_or_else(
+        || "invalid session key payload".to_string()
+    )?;
+    let mut session_key = [0u8; SESSION_KEY_LEN];
+    session_key[..SESSION_KEY_HALF_LEN].copy_from_slice(&client_half);
+    session_key[SESSION_KEY_HALF_LEN..].copy_from_slice(&server_half);
+    Ok(data_handler.with_session_key(&session_key))
+}
+
 async fn server_connection<T: LoadingParams + Send + 'static>(
     params: T,
     service_name: String,
@@ -42,6 +125,7 @@ async fn server_connection<T: LoadingParams + Send + 'static>(
     addr: String,
     transfer: Uuid,
     data_handler: Arc<DataHandlerSettings>,
+    conn_slot: ConnHandlerSlot,
     mut to_server_channel: mpsc::Receiver<Bytes>,
 ) {
     let mut reconnect_attempts: usize = 0;
@@ -75,9 +159,37 @@ async fn server_connection<T: LoadingParams + Send + 'static>(
                     );
                 }
                 let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+                let mut session_handler: Option<Arc<DataHandlerSettings>> = None;
+                let mut handshake_failed = false;
+                if !done && data_handler.encryption_enabled() {
+                    let mut dropped_stale = 0;
+                    while to_server_channel.try_recv().is_ok() {
+                        dropped_stale += 1;
+                    }
+                    if dropped_stale > 0 {
+                        warn!("Dropped {} stale encrypted messages in {}", dropped_stale, connection_info);
+                    }
+                    conn_slot.invalidate().await;
+                    match process_handshake(&mut framed, &data_handler, &transfer).await {
+                        Ok(handler) => {
+                            let handler_arc = Arc::new(handler);
+                            conn_slot.set(handler_arc.clone()).await;
+                            session_handler = Some(handler_arc);
+                        },
+                        Err(err) => {
+                            warn!("Session handshake failed in {}: {}", connection_info, err);
+                            transfer_error += 1;
+                            handshake_failed = true;
+                        }
+                    }
+                }
+                let active_handler: &DataHandlerSettings = match &session_handler {
+                    Some(handler) => handler.as_ref(),
+                    None => data_handler.as_ref(),
+                };
                 // processing in/out
                 loop {
-                    if done {
+                    if done || handshake_failed {
                         break;
                     }
                     tokio::select! {
@@ -87,7 +199,7 @@ async fn server_connection<T: LoadingParams + Send + 'static>(
                                     let bytes_slice = frame.as_ref();
                                     let n = bytes_slice.len();
                                     reconnect_attempts = 0;
-                                    match data_handler.load_data_message(bytes_slice) {
+                                    match active_handler.load_data_message(bytes_slice) {
                                         Ok((msg, transfer)) => {
                                             let with_client = send_data(&transfer, &msg.data).await;
                                             if msg.data.is_empty() || transfer.is_nil() {
@@ -244,6 +356,7 @@ async fn tcp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                 let wait_before_close_time = settings.collect_message_timeout(true);
                 let data_handler_conn = data_handler.clone();
                 let data_handler_out = data_handler.clone();
+                let conn_slot = ConnHandlerSlot::new();
                 let (serv_tx, serv_rx) = mpsc::channel(service_out_channel_size);
                 let to_server_channel = serv_tx.clone();
                 let server_addr= addr.clone();
@@ -251,6 +364,8 @@ async fn tcp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                 info!("New connection {} in {} from {}", transfer, service_name_display, c_addr);
                 let conn_info = c_addr.ip().to_string();
                 let conn_settings = settings.clone();
+                let conn_slot_server = conn_slot.clone();
+                let conn_slot_local = conn_slot;
                 tokio::spawn(async move {
                     server_connection(
                         conn_settings,
@@ -259,6 +374,7 @@ async fn tcp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                         server_addr,
                         transfer,
                         data_handler_out,
+                        conn_slot_server,
                         serv_rx,
                     ).await;
                 });
@@ -272,6 +388,7 @@ async fn tcp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                         from_client_channel,
                         stream,
                         data_handler_conn,
+                        conn_slot_local,
                         to_server_channel,
                         buffer_size,
                         idle_limit,
@@ -294,6 +411,7 @@ async fn tcp_connection_processing(
     mut from_client_channel: mpsc::Receiver<(Uuid, Bytes)>,
     stream: TcpStream,
     data_handler: Arc<DataHandlerSettings>,
+    conn_slot: ConnHandlerSlot,
     to_server_channel: mpsc::Sender<Bytes>,
     buffer_size: usize,
     idle_limit: Duration,
@@ -310,6 +428,7 @@ async fn tcp_connection_processing(
     let (mut in_bytes, mut out_bytes, mut error_count) = (0, 0, 0);
     // Periodic stat flusher: misses bursts instead of being dropped by the busy loop.
     let mut stat_tick = interval(stat_save_iter);
+    let mut session_cache: Option<SessionCache> = None;
     // data handler
     loop {
         tokio::select! {
@@ -329,7 +448,8 @@ async fn tcp_connection_processing(
                     break;
                 }
                 out_bytes = n;
-                let data = data_handler.make_data_message(&buf[..n], &service_code, &transfer);
+                let handler = resolve_session_handler(&conn_slot, &data_handler, &mut session_cache).await;
+                let data = handler.make_data_message(&buf[..n], &service_code, &transfer);
                 if let Err(err) = to_server_channel.send(data).await {
                     warn!("Failed to send data to server channel {} in {}: {}", t_inf, service_name, err);
                     local_dead = true;
@@ -448,6 +568,7 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
             let stat_key = format!("in-{}-{}", service_name, ip);
             let mut buf = vec![0; buffer_size];
             let server_channels = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+            let session_slots = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
             let conn_settings = settings_local.clone();
             let (_, service_out_channel_size) = settings_local.channel_size();
             let mut out_bytes: usize = 0;
@@ -470,8 +591,9 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                                 let stat_key_peer = format!("in-{}-{}", service_name, peer.ip());
                                 *peer_out.entry(stat_key_peer.clone()).or_insert(0) += n;
                                 let transfer = code_name(&format!("{}-{}-{}", serv_code, client_name, peer));
-                                let data = data_handler.make_data_message(&buf[..n], &serv_code, &transfer);
+                                let mut is_new_peer = false;
                                 if !exists(&transfer).await {
+                                    is_new_peer = true;
                                     add_connection(&stat_key).await;
                                     info!("New UDP peer {} in {}", part_uuid(&transfer), service_display);
                                     let from_client_channel = add_route(&transfer).await;
@@ -482,6 +604,8 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                                     let service_display_peer = service_display.clone();
                                     let (serv_tx, serv_rx) = mpsc::channel(service_out_channel_size);
                                     server_channels.write().await.insert(transfer, serv_tx);
+                                    let conn_slot = ConnHandlerSlot::new();
+                                    session_slots.write().await.insert(transfer, conn_slot.clone());
                                     let conn_settings_spawn = conn_settings.clone();
                                     let data_handler_spawn = data_handler.clone();
                                     tokio::spawn(async move {
@@ -492,11 +616,13 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                                             server_addr,
                                             transfer,
                                             data_handler_spawn,
+                                            conn_slot,
                                             serv_rx,
                                         ).await;
                                     });
 
                                     let channels_clone = Arc::clone(&server_channels);
+                                    let slots_clone = Arc::clone(&session_slots);
                                     let aggregate_stat_key = stat_key.clone();
                                     tokio::spawn(async move {
                                         udp_peer_processing(
@@ -509,6 +635,7 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                                             from_client_channel,
                                             socket,
                                             channels_clone,
+                                            slots_clone,
                                             min_delay,
                                             idle_limit,
                                             stat_save_iter,
@@ -517,19 +644,40 @@ async fn udp_client_processing(settings: &Settings, tasks: &mut JoinSet<TaskResu
                                     });
                                 }
                                 // Read lock + cloned sender: the map is read on every packet, and sending needs no mutation.
+                                let slot_opt = session_slots.read().await.get(&transfer).cloned();
                                 let tx_opt = server_channels.read().await.get(&transfer).cloned();
-                                match tx_opt {
-                                    Some(tx) => {
-                                        if let Err(err) = tx.send(data).await {
-                                             warn!("Failed to send data to server channel {} in {}: {}", part_uuid(&transfer), service_display, err);
-                                            let mut channels_guard = server_channels.write().await;
-                                            match channels_guard.remove(&transfer) {
-                                                Some(_) => info!("Removed server channel for transfer {} in {}", part_uuid(&transfer), service_display),
-                                                None => warn!("Server channel for transfer {} was already gone before remove in {}", part_uuid(&transfer), service_display),
-                                            }
+                                match (slot_opt, tx_opt) {
+                                    (Some(slot), Some(tx)) => {
+                                        let handler_opt = if !data_handler.encryption_enabled() {
+                                            Some(data_handler.clone())
+                                        } else if is_new_peer {
+                                            try_get_slot_handler(&slot, &data_handler, HANDSHAKE_WAIT_TIMEOUT).await
+                                        } else {
+                                            slot.get().await.1
+                                        };
+                                        match handler_opt {
+                                            Some(handler) => {
+                                                let data = handler.make_data_message(&buf[..n], &serv_code, &transfer);
+                                                if let Err(err) = tx.send(data).await {
+                                                     warn!("Failed to send data to server channel {} in {}: {}", part_uuid(&transfer), service_display, err);
+                                                    let mut channels_guard = server_channels.write().await;
+                                                    match channels_guard.remove(&transfer) {
+                                                        Some(_) => info!("Removed server channel for transfer {} in {}", part_uuid(&transfer), service_display),
+                                                        None => warn!("Server channel for transfer {} was already gone before remove in {}", part_uuid(&transfer), service_display),
+                                                    }
+                                                    let mut slots_guard = session_slots.write().await;
+                                                    if slots_guard.remove(&transfer).is_some() {
+                                                        debug!("Removed session slot for transfer {} in {}", part_uuid(&transfer), service_display);
+                                                    }
+                                                }
+                                            },
+                                            None => warn!(
+                                                "No session handler for UDP transfer {} in {}, dropping packet",
+                                                part_uuid(&transfer), service_display
+                                            ),
                                         }
                                     },
-                                    None => error!("No route for transfer {} in {}", part_uuid(&transfer), service_display),
+                                    _ => error!("No route for transfer {} in {}", part_uuid(&transfer), service_display),
                                 }
                             }
                         },
@@ -572,6 +720,7 @@ async fn udp_peer_processing(
     mut from_client_channel: mpsc::Receiver<(Uuid, Bytes)>,
     socket: Arc<UdpSocket>,
     server_channels: Arc<tokio::sync::RwLock<HashMap<Uuid, mpsc::Sender<Bytes>>>>,
+    session_slots: Arc<tokio::sync::RwLock<HashMap<Uuid, ConnHandlerSlot>>>,
     min_delay: Duration,
     idle_limit: Duration,
     stat_save_iter: Duration,
@@ -594,6 +743,10 @@ async fn udp_peer_processing(
                         Some(_) => info!("Removed server channel for transfer {} in {}", t_inf, service_name),
                         None => warn!("Server channel for transfer {} was already gone before remove in {}", t_inf, service_name),
                     }
+                    let mut slots_guard = session_slots.write().await;
+                    if slots_guard.remove(&transfer).is_some() {
+                        debug!("Removed session slot for transfer {} in {}", t_inf, service_name);
+                    }
                     remove_route(&transfer).await;
                     break;
                 }
@@ -614,6 +767,10 @@ async fn udp_peer_processing(
                 match channels_guard.remove(&transfer) {
                     Some(_) => info!("Removed server channel for transfer {} in {}", t_inf, service_name),
                     None => warn!("Server channel for transfer {} was already gone before remove in {}", t_inf, service_name),
+                }
+                let mut slots_guard = session_slots.write().await;
+                if slots_guard.remove(&transfer).is_some() {
+                    debug!("Removed session slot for transfer {} in {}", t_inf, service_name);
                 }
                 remove_route(&transfer).await;
                 break;

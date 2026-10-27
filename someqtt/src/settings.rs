@@ -34,6 +34,10 @@ const ENV_JSON_DATA_BASE: &str = "JSON_DATA_BASE";
 const ENV_PEER_FRAME_ERROR_LIMIT: &str = "PEER_FRAME_ERROR_LIMIT";
 pub const DEFAULT_PEER_FRAME_ERROR_LIMIT: usize = 20;
 pub const DEFAULT_JSON_DATA_BASE: usize = 64;
+pub const SESSION_KEY_LEN: usize = 32;
+pub const SESSION_KEY_HALF_LEN: usize = SESSION_KEY_LEN / 2;
+pub const HANDSHAKE_PAYLOAD_LEN: usize = 256;
+pub const HANDSHAKE_SERVICE_TAIL_LEN: usize = 8;
 
 // Parse JSON_DATA_BASE value: only 64 or 85 are valid, anything else falls back to the default.
 fn parse_json_data_base(raw: &str) -> Option<usize> {
@@ -520,7 +524,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliParseResult, String> {
                         Err(e) => return Err(format!("invalid value for --genkey: '{}'", e)),
                     }
                 } else {
-                    "32".to_string()
+                    SESSION_KEY_LEN.to_string()
                 };
                 let size: usize = raw.parse().map_err(|_| format!("invalid value for --genkey: '{}'", raw))?;
                 if size < 1 || size > 512 {
